@@ -36,14 +36,26 @@ def _fmt_money(v: float) -> str:
     return f"{v:,.0f}"
 
 
+GRADE_ONELINE = {
+    "S": "지표 거의 전부 정렬 — 이미 많이 오른 뒤일 수 있음",
+    "A": "주요 지표 대부분 충족",
+    "B": "절반 이상 충족 — 관찰 대상",
+    "C": "일부만 충족 — 참고용",
+}
+
+
 def _line(it: dict) -> str:
     g = GRADE_EMOJI.get(it["grade"], "")
     r = it["risk"]
+    head = it.get("headline", "")
+    rr_warn = "" if r.get("rr_ok", True) else " ⚠손익비낮음"
     return (f"{g} <b>{html.escape(it['name'])}</b> "
-            f"<code>{it['score']:.0f}점</code> {it['grade']}\n"
+            f"<code>{it['score']:.0f}점</code> {it['grade']}등급\n"
             f"   {_fmt_price(it['price'])} ({it['change_pct']:+.1f}%) · "
             f"거래대금 {_fmt_money(it.get('turnover', 0))} · 조건 {it['checks_passed']}/8\n"
-            f"   손절 {r['stop_pct']:+.1f}% / 목표 {r['target_pct']:+.1f}% (R:R {r['rr']:.1f})")
+            + (f"   ▸ {html.escape(head)}\n" if head else "")
+            + f"   손절 {r['stop_pct']:+.1f}% / 목표 {r['target_pct']:+.1f}% "
+              f"(손익비 {r['rr']:.1f}){rr_warn}")
 
 
 def _build_message(payload: dict, items: list[dict], title: str) -> str:
@@ -54,8 +66,14 @@ def _build_message(payload: dict, items: list[dict], title: str) -> str:
             f"{payload['scanned']:,}종목 스캔\n"
             f"S {gc.get('S',0)} / A {gc.get('A',0)} / B {gc.get('B',0)} / C {gc.get('C',0)}\n")
     body = "\n\n".join(_line(i) for i in items[:10])
-    tail = f"\n\n📊 <a href=\"{url}\">전체 결과 보기</a>" if url else ""
-    return head + "\n" + body + tail + "\n\n<i>투자 판단 참고용이며 매매 권유가 아닙니다.</i>"
+    shown = {i["grade"] for i in items[:10]}
+    legend = "\n".join(f"{GRADE_EMOJI[g]} <b>{g}</b> {GRADE_ONELINE[g]}"
+                       for g in ("S", "A", "B", "C") if g in shown)
+    tail = f"\n\n📊 <a href=\"{url}\">전체 결과·지표 수치 보기</a>" if url else ""
+    return (head + "\n" + body + tail
+            + (f"\n\n<b>등급 안내</b>\n{legend}" if legend else "")
+            + "\n\n<i>점수는 '오를 확률'이 아니라 차트가 매수 조건에 얼마나 부합하는지입니다. "
+              "공시·실적은 반영되지 않으며 매매 권유가 아닙니다.</i>")
 
 
 # ── 텔레그램 ────────────────────────────────────────────────
@@ -107,7 +125,8 @@ def _email_html(payload: dict, items: list[dict], title: str) -> str:
         r = it["risk"]
         rows.append(
             f"<tr><td>{i}</td><td><b>{html.escape(it['name'])}</b><br>"
-            f"<span style='color:#888;font-size:12px'>{it['symbol']}</span></td>"
+            f"<span style='color:#888;font-size:12px'>{it['symbol']}"
+            f"{' · ' + html.escape(it['headline']) if it.get('headline') else ''}</span></td>"
             f"<td align='center'><b>{it['score']:.0f}</b><br>"
             f"<span style='font-size:12px'>{it['grade']}</span></td>"
             f"<td align='right'>{_fmt_price(it['price'])}<br>"
@@ -127,8 +146,14 @@ def _email_html(payload: dict, items: list[dict], title: str) -> str:
 <th align="right">현재가</th><th>조건</th><th align="right">손절/목표</th></tr>
 {''.join(rows)}
 </table>{link}
-<p style="color:#999;font-size:12px">투자 판단 참고용이며 매매 권유가 아닙니다.
-지표는 후행하며 공시·실적 등 재료는 반영되지 않습니다.</p></div>"""
+<table cellpadding="6" cellspacing="0" border="0" style="font-size:12.5px;margin-top:14px">
+<tr><td colspan="2"><b>등급 안내</b></td></tr>
+{''.join(f"<tr><td valign='top'><b>{g}</b></td><td>{GRADE_ONELINE[g]}</td></tr>"
+         for g in ('S', 'A', 'B', 'C'))}
+</table>
+<p style="color:#999;font-size:12px">점수는 '오를 확률'이 아니라 지금 차트가 교과서적인 매수
+조건에 얼마나 부합하는지입니다. 지표는 모두 과거 가격의 함수라 후행하며, 공시·실적·뉴스는
+반영되지 않습니다. 투자 판단 참고용이며 매매 권유가 아닙니다.</p></div>"""
 
 
 # ── 디스패치 ────────────────────────────────────────────────

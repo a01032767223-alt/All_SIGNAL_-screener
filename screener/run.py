@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from . import config as C
+from . import rules as R
 from . import score as S
 
 KST = timezone(timedelta(hours=9))
@@ -162,6 +163,15 @@ def _payload(market: str, items: list[dict], scanned: int, data_date: str) -> di
     counts = {}
     for it in items:
         counts[it["grade"]] = counts.get(it["grade"], 0) + 1
+
+    total_found = len(items)
+    truncated = max(0, total_found - C.MAX_OUTPUT_ITEMS)
+    if truncated:
+        # 조용히 잘라내지 않고 몇 건을 뺐는지 남깁니다
+        print(f"[out] 후보 {total_found:,}건 중 상위 {C.MAX_OUTPUT_ITEMS}건만 저장 "
+              f"({truncated:,}건 제외, 최저 점수 {items[C.MAX_OUTPUT_ITEMS - 1]['score']:.1f})")
+        items = items[:C.MAX_OUTPUT_ITEMS]
+
     return {
         "market": market,
         "market_label": MARKET_LABEL.get(market, market),
@@ -169,10 +179,16 @@ def _payload(market: str, items: list[dict], scanned: int, data_date: str) -> di
         "data_date": data_date,
         "scanned": scanned,
         "count": len(items),
+        "total_found": total_found,
+        "truncated": truncated,
         "grade_counts": counts,
         "weights": C.WEIGHTS,
         "indicator_labels": C.INDICATOR_LABELS,
         "grade_cuts": {g: c for g, c in C.GRADE_CUTS},
+        # 종목마다 같은 내용이라 최상단에 한 번만 담습니다
+        "grade_info": C.GRADE_INFO,
+        "indicator_help": R.BEGINNER_HELP,
+        "conditions": R.CORE_CONDITION_TEXT,
         "items": items,
     }
 

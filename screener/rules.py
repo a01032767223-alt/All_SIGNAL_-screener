@@ -291,6 +291,175 @@ CORE_CONDITION_TEXT = {
 }
 
 
+# ─────────────────────────────────────────────────────────
+# 초보자용 해설 — 지표가 무엇이고 왜 보는지
+# ─────────────────────────────────────────────────────────
+BEGINNER_HELP = {
+    "ma": "최근 며칠간 주가의 평균을 이은 선입니다. 20일 평균선이 60일 평균선보다 위에 있고 "
+          "현재가가 그 위에 있으면 '오르는 흐름'으로 봅니다. 다만 평균선에서 너무 멀리 "
+          "떨어져 있으면 단기 과열이라 감점합니다.",
+    "volume": "얼마나 많이 거래됐는지입니다. 가격이 오를 때 거래량이 평소보다 크게 늘면 "
+              "'실제로 사려는 사람이 많다'는 신호로 봅니다. 반대로 거래량이 폭증하면서 "
+              "가격이 떨어지면 파는 물량이 쏟아진 것이라 감점합니다.",
+    "structure": "최근 60일 중 가장 높았던 가격이 '저항', 가장 낮았던 가격이 '지지'입니다. "
+                 "저항을 뚫고 올라가면 위쪽에 팔려는 물량이 사라졌다는 뜻이고, "
+                 "지지선에서 다시 튀어오르면 아래쪽에 사려는 사람이 있다는 뜻입니다.",
+    "rsi": "0~100 사이 값으로 '얼마나 과열됐는지'를 봅니다. 70을 넘으면 너무 올라 숨 고르기가 "
+           "올 수 있고, 30 아래면 너무 떨어진 상태입니다. 30~50 구간에서 방향을 위로 "
+           "틀 때가 가장 좋은 점수를 받습니다.",
+    "macd": "빠른 평균선과 느린 평균선의 차이입니다. 빠른 선이 느린 선을 아래에서 위로 "
+            "뚫는 것을 '골든크로스'라 부르고, 상승 전환 신호로 봅니다.",
+    "bb": "평균선 위아래로 그린 통로입니다. 통로가 좁아졌다가(에너지 응축) 위로 뚫고 나가면 "
+          "큰 움직임의 시작일 수 있습니다. 아래쪽 벽에 닿았다가 튀어오르는 것도 신호입니다.",
+    "adx": "'추세가 얼마나 힘 있는가'만 봅니다. 방향은 +DI와 −DI로 판단합니다. "
+           "ADX가 20~25를 넘고 +DI가 −DI보다 크면 상승 추세에 힘이 실린 상태입니다.",
+    "obv": "가격이 오른 날의 거래량은 더하고 내린 날은 빼서 누적한 값입니다. "
+           "가격은 아직 조용한데 이 값이 계속 오르면 '누군가 조용히 모으고 있다'고 봅니다.",
+}
+
+# 카드에 한 줄로 붙일 태그 (조건 충족 시)
+HEADLINE_TAG = {
+    "ma": "상승 추세", "volume": "거래량 급증", "structure": "저항 돌파·지지 반등",
+    "rsi": "RSI 반등 구간", "macd": "MACD 골든크로스", "bb": "볼린저 돌파",
+    "adx": "추세 강함", "obv": "매집 흐름",
+}
+
+
+def fmt_price(v: float) -> str:
+    """국내주식(정수)과 코인(소수)을 한 함수로 처리."""
+    v = _f(v)
+    if math.isnan(v):
+        return "-"
+    if abs(v) >= 1000:
+        return f"{v:,.0f}"
+    if abs(v) >= 1:
+        return f"{v:,.2f}"
+    return f"{v:,.4f}"
+
+
+def fmt_qty(v: float) -> str:
+    v = _f(v)
+    if math.isnan(v):
+        return "-"
+    if abs(v) >= 1e8:
+        return f"{v/1e8:,.1f}억"
+    if abs(v) >= 1e4:
+        return f"{v/1e4:,.1f}만"
+    return f"{v:,.0f}"
+
+
+def _row(k: str, v: str, note: str = "") -> dict:
+    return {"k": k, "v": v, "note": note}
+
+
+def indicator_metrics(edf) -> dict[str, list[dict]]:
+    """지표별 '실제 수치' 목록. 점수의 근거를 숫자로 그대로 보여주기 위한 것."""
+    cur = edf.iloc[-1]
+    prev = edf.iloc[-2] if len(edf) >= 2 else cur
+    prev5 = edf.iloc[-6] if len(edf) >= 6 else cur
+
+    close = _f(cur["close"])
+    ma5, ma20, ma60, ma120 = (_f(cur.get(f"ma{p}")) for p in (5, 20, 60, 120))
+    ma20_prev = _f(prev5.get("ma20"))
+
+    dev20 = (close / ma20 - 1) * 100 if ma20 else float("nan")
+    slope20 = (ma20 / ma20_prev - 1) * 100 if ma20_prev else float("nan")
+    if not any(math.isnan(x) for x in (ma5, ma20, ma60)):
+        order = "정배열 (5 > 20 > 60)" if ma5 > ma20 > ma60 else \
+                "역배열 (5 < 20 < 60)" if ma5 < ma20 < ma60 else "혼재"
+    else:
+        order = "-"
+
+    vol, vol_ma = _f(cur.get("volume")), _f(cur.get("vol_ma"))
+    vr = _f(cur.get("vol_ratio"))
+
+    hi, lo = _f(cur.get("high_n")), _f(cur.get("low_n"))
+    prior_high = _f(cur.get("prior_high"))
+    pos = (close - lo) / (hi - lo) * 100 if hi > lo else float("nan")
+    to_res = (prior_high / close - 1) * 100 if close and prior_high else float("nan")
+
+    r, rp = _f(cur.get("rsi")), _f(prev.get("rsi"))
+    m, s, h = _f(cur.get("macd")), _f(cur.get("macd_signal")), _f(cur.get("macd_hist"))
+    hp = _f(prev.get("macd_hist"))
+    bu, bm, bl = _f(cur.get("bb_upper")), _f(cur.get("bb_mid")), _f(cur.get("bb_lower"))
+    pb, bw, bwp = _f(cur.get("bb_pct_b")), _f(cur.get("bb_width")), _f(cur.get("bb_width_pct"))
+    a, pdi, mdi = _f(cur.get("adx")), _f(cur.get("plus_di")), _f(cur.get("minus_di"))
+    osl, o, omx = _f(cur.get("obv_slope")), _f(cur.get("obv")), _f(cur.get("obv_max60"))
+
+    def pct(v, digits=2):
+        return "-" if math.isnan(v) else f"{v:+.{digits}f}%"
+
+    return {
+        "ma": [
+            _row("현재가", fmt_price(close)),
+            _row("5일 평균선", fmt_price(ma5)),
+            _row("20일 평균선", fmt_price(ma20), "단기 흐름의 기준선"),
+            _row("60일 평균선", fmt_price(ma60), "중기 흐름의 기준선"),
+            _row("120일 평균선", fmt_price(ma120)),
+            _row("20일선 대비 이격", pct(dev20), "+15% 넘으면 과열로 감점"),
+            _row("20일선 5일 기울기", pct(slope20), "양수면 평균선이 올라가는 중"),
+            _row("배열 상태", order),
+        ],
+        "volume": [
+            _row("당일 거래량", fmt_qty(vol) + "주"),
+            _row("20일 평균 거래량", fmt_qty(vol_ma) + "주"),
+            _row("평균 대비", "-" if math.isnan(vr) else f"{vr:.2f}배", "1.5배 이상이 기준"),
+            _row("당일 등락률", pct(_f(cur.get("ret_pct"), 0.0))),
+        ],
+        "structure": [
+            _row("60일 최고가 (저항)", fmt_price(hi), "이 가격을 뚫으면 돌파"),
+            _row("60일 최저가 (지지)", fmt_price(lo), "이 근처는 매수세가 나오던 구간"),
+            _row("박스 내 위치", "-" if math.isnan(pos) else f"{pos:.0f}%",
+                 "0%=바닥, 100%=천장"),
+            _row("저항까지 거리", pct(to_res), "음수면 이미 돌파한 상태"),
+        ],
+        "rsi": [
+            _row("RSI (14일)", "-" if math.isnan(r) else f"{r:.1f}", "70↑ 과열 / 30↓ 침체"),
+            _row("전일 RSI", "-" if math.isnan(rp) else f"{rp:.1f}"),
+            _row("전일 대비", "-" if math.isnan(r - rp) else f"{r - rp:+.1f}",
+                 "양수면 위로 방향 전환"),
+        ],
+        "macd": [
+            _row("MACD", fmt_price(m), "0보다 크면 중기 상승권"),
+            _row("시그널", fmt_price(s), "MACD가 이 선을 위로 뚫으면 골든크로스"),
+            _row("히스토그램", fmt_price(h), "MACD − 시그널"),
+            _row("전일 히스토그램", fmt_price(hp), "늘어나는 중이면 힘이 붙는 것"),
+        ],
+        "bb": [
+            _row("상단선", fmt_price(bu)),
+            _row("중심선 (20일 평균)", fmt_price(bm)),
+            _row("하단선", fmt_price(bl)),
+            _row("%B (통로 내 위치)", "-" if math.isnan(pb) else f"{pb:.2f}",
+                 "0=하단, 1=상단"),
+            _row("밴드폭", "-" if math.isnan(bw) else f"{bw*100:.1f}%"),
+            _row("밴드폭 백분위", "-" if math.isnan(bwp) else f"{bwp*100:.0f}%",
+                 "20% 이하면 응축 상태"),
+        ],
+        "adx": [
+            _row("ADX (14일)", "-" if math.isnan(a) else f"{a:.1f}", "20~25 넘으면 추세 형성"),
+            _row("+DI (상승 힘)", "-" if math.isnan(pdi) else f"{pdi:.1f}"),
+            _row("−DI (하락 힘)", "-" if math.isnan(mdi) else f"{mdi:.1f}",
+                 "+DI가 더 크면 상승 우위"),
+        ],
+        "obv": [
+            _row("OBV 20봉 변화", pct(osl, 1), "양수면 매집, 음수면 분산"),
+            _row("60봉 신고 여부",
+                 "신고 갱신" if (not math.isnan(o) and not math.isnan(omx) and o >= omx * 0.999)
+                 else "미갱신"),
+        ],
+    }
+
+
+def headline(parts: dict) -> str:
+    """카드에 한 줄로 붙일 요약 — 충족한 조건 중 비중 큰 순으로 최대 3개."""
+    ok = [(p["weight"], HEADLINE_TAG.get(k, p["label"]))
+          for k, p in parts.items() if p["ok"]]
+    if not ok:
+        return "충족 조건 없음 — 참고용"
+    ok.sort(key=lambda x: -x[0])
+    return " · ".join(t for _, t in ok[:3])
+
+
 def score_all(edf) -> dict:
     """지표가 붙은 DataFrame(enrich 결과) → 지표별 점수 dict."""
     cur = edf.iloc[-1]
@@ -309,6 +478,7 @@ def score_all(edf) -> dict:
         "obv":       score_obv(cur),
     }
 
+    metrics = indicator_metrics(edf)
     parts, total = {}, 0.0
     for key, (sc, note, ok) in raw.items():
         w = C.WEIGHTS[key]
@@ -320,6 +490,8 @@ def score_all(edf) -> dict:
             "contrib": round(sc * w / 100.0, 2),
             "detail": note,
             "ok": bool(ok),
-            "condition": CORE_CONDITION_TEXT[key],
+            "metrics": metrics.get(key, []),   # 실제 수치
         }
+        # 조건문·초보자 해설은 종목마다 같은 내용이므로 JSON 최상단에 한 번만 담습니다
+        # (200종목 × 8지표만큼 반복하면 모바일에서 로딩이 느려집니다)
     return {"total": round(_clamp(total), 2), "parts": parts}

@@ -93,15 +93,13 @@ def evaluate(frames: dict[str, pd.DataFrame], asset_class: str) -> dict | None:
 
     cur = daily_edf.iloc[-1]
     parts = tf_results["1d"]["parts"]
-    checks = [
-        {"key": k, "label": p["label"], "condition": p["condition"],
-         "ok": p["ok"], "score": p["score"], "weight": p["weight"], "detail": p["detail"]}
-        for k, p in parts.items()
-    ]
+    # 카드의 미니 막대에 필요한 최소 정보만 (상세 화면은 parts를 씁니다)
+    checks = [{"key": k, "ok": p["ok"], "score": p["score"]} for k, p in parts.items()]
 
     return {
         "score": round(combined, 2),
         "grade": grade_of(combined),
+        "headline": R.headline(parts),
         "mtf_aligned": bool(aligned and len(tf_results) > 1),
         "timeframes": {tf: {"label": v["label"], "score": v["total"]} for tf, v in tf_results.items()},
         "parts": parts,

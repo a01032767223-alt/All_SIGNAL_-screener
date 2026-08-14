@@ -51,12 +51,15 @@ def list_markets() -> pd.DataFrame:
         if not code.startswith("KRW-"):
             continue
         event = m.get("market_event") or {}
-        warning = bool(event.get("warning") or m.get("market_warning") == "CAUTION")
         caution = event.get("caution") or {}
+        # caution은 항목별 bool dict — 딕셔너리 존재 여부가 아니라 값이 하나라도 True인지 확인해야 한다
+        # (빈 dict나 전부 False인 dict를 True로 보면 정상 종목까지 걸러진다)
+        caution_on = any(bool(v) for v in caution.values()) if isinstance(caution, dict) else bool(caution)
+        warning = bool(event.get("warning")) or m.get("market_warning") == "CAUTION"
         rows.append({
             "market": code,
             "name": m.get("korean_name", code),
-            "warning": warning or bool(caution),
+            "warning": warning or caution_on,
         })
     return pd.DataFrame(rows).set_index("market")
 

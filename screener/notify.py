@@ -1,0 +1,155 @@
+"""알림 — 텔레그램 봇 + Gmail SMTP.
+
+필요한 환경변수(GitHub Secrets):
+  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID     ← 텔레그램
+  GMAIL_USER, GMAIL_APP_PASSWORD, MAIL_TO  ← 이메일
+  PAGES_URL                                ← 대시보드 주소 (선택)
+설정되지 않은 채널은 조용히 건너뛴다.
+"""
+from __future__ import annotations
+
+import html
+import os
+import smtplib
+from email.mime.text import MIMEText
+
+import requests
+
+GRADE_EMOJI = {"S": "🔥", "A": "🟢", "B": "🟡", "C": "⚪"}
+
+
+def _fmt_price(v: float) -> str:
+    if v >= 1000:
+        return f"{v:,.0f}"
+    if v >= 1:
+        return f"{v:,.2f}"
+    return f"{v:,.4f}"
+
+
+def _fmt_money(v: float) -> str:
+    if v >= 1e12:
+        return f"{v/1e12:.1f}조"
+    if v >= 1e8:
+        return f"{v/1e8:.0f}억"
+    if v >= 1e4:
+        return f"{v/1e4:.0f}만"
+    return f"{v:,.0f}"
+
+
+def _line(it: dict) -> str:
+    g = GRADE_EMOJI.get(it["grade"], "")
+    r = it["risk"]
+    return (f"{g} <b>{html.escape(it['name'])}</b> "
+            f"<code>{it['score']:.0f}점</code> {it['grade']}\n"
+            f"   {_fmt_price(it['price'])} ({it['change_pct']:+.1f}%) · "
+            f"거래대금 {_fmt_money(it.get('turnover', 0))} · 조건 {it['checks_passed']}/8\n"
+            f"   손절 {r['stop_pct']:+.1f}% / 목표 {r['target_pct']:+.1f}% (R:R {r['rr']:.1f})")
+
+
+def _build_message(payload: dict, items: list[dict], title: str) -> str:
+    url = os.getenv("PAGES_URL", "").strip()
+    gc = payload.get("grade_counts", {})
+    head = (f"<b>{title}</b>\n"
+            f"{payload['market_label']} · {payload['data_date']} · "
+            f"{payload['scanned']:,}종목 스캔\n"
+            f"S {gc.get('S',0)} / A {gc.get('A',0)} / B {gc.get('B',0)} / C {gc.get('C',0)}\n")
+    body = "\n\n".join(_line(i) for i in items[:10])
+    tail = f"\n\n📊 <a href=\"{url}\">전체 결과 보기</a>" if url else ""
+    return head + "\n" + body + tail + "\n\n<i>투자 판단 참고용이며 매매 권유가 아닙니다.</i>"
+
+
+# ── 텔레그램 ────────────────────────────────────────────────
+def send_telegram(text: str) -> bool:
+    token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        print("[notify] 텔레그램 설정 없음 → 건너뜀")
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat, "text": text[:4000], "parse_mode": "HTML",
+                  "disable_web_page_preview": True},
+            timeout=20)
+        ok = r.status_code == 200
+        print(f"[notify] 텔레그램 {'성공' if ok else '실패: ' + r.text[:200]}")
+        return ok
+    except Exception as e:
+        print(f"[notify] 텔레그램 오류: {e}")
+        return False
+
+
+# ── 이메일 ─────────────────────────────────────────────────
+def send_email(subject: str, html_body: str) -> bool:
+    user, pw = os.getenv("GMAIL_USER"), os.getenv("GMAIL_APP_PASSWORD")
+    to = os.getenv("MAIL_TO") or user
+    if not user or not pw or not to:
+        print("[notify] 이메일 설정 없음 → 건너뜀")
+        return False
+    try:
+        msg = MIMEText(html_body, "html", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = user
+        msg["To"] = to
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
+            s.login(user, pw)
+            s.sendmail(user, [x.strip() for x in to.split(",")], msg.as_string())
+        print("[notify] 이메일 발송 성공")
+        return True
+    except Exception as e:
+        print(f"[notify] 이메일 오류: {e}")
+        return False
+
+
+def _email_html(payload: dict, items: list[dict], title: str) -> str:
+    url = os.getenv("PAGES_URL", "").strip()
+    rows = []
+    for i, it in enumerate(items[:20], 1):
+        r = it["risk"]
+        rows.append(
+            f"<tr><td>{i}</td><td><b>{html.escape(it['name'])}</b><br>"
+            f"<span style='color:#888;font-size:12px'>{it['symbol']}</span></td>"
+            f"<td align='center'><b>{it['score']:.0f}</b><br>"
+            f"<span style='font-size:12px'>{it['grade']}</span></td>"
+            f"<td align='right'>{_fmt_price(it['price'])}<br>"
+            f"<span style='color:{'#d33' if it['change_pct']>=0 else '#38f'};font-size:12px'>"
+            f"{it['change_pct']:+.1f}%</span></td>"
+            f"<td align='center'>{it['checks_passed']}/8</td>"
+            f"<td align='right'>{r['stop_pct']:+.1f}% / {r['target_pct']:+.1f}%<br>"
+            f"<span style='font-size:12px'>R:R {r['rr']:.1f}</span></td></tr>")
+    link = f"<p><a href='{url}'>전체 결과 대시보드 열기</a></p>" if url else ""
+    return f"""<div style="font-family:-apple-system,'Malgun Gothic',sans-serif;max-width:640px">
+<h2 style="margin-bottom:4px">{html.escape(title)}</h2>
+<p style="color:#666;margin-top:0">{payload['market_label']} · {payload['data_date']} ·
+{payload['scanned']:,}종목 스캔 · 후보 {payload['count']}개</p>
+<table cellpadding="8" cellspacing="0" border="0" width="100%"
+ style="border-collapse:collapse;font-size:14px">
+<tr style="background:#f4f4f6"><th>#</th><th align="left">종목</th><th>점수</th>
+<th align="right">현재가</th><th>조건</th><th align="right">손절/목표</th></tr>
+{''.join(rows)}
+</table>{link}
+<p style="color:#999;font-size:12px">투자 판단 참고용이며 매매 권유가 아닙니다.
+지표는 후행하며 공시·실적 등 재료는 반영되지 않습니다.</p></div>"""
+
+
+# ── 디스패치 ────────────────────────────────────────────────
+def dispatch(payload: dict, new_items: list[dict], force_summary: bool = False) -> None:
+    label = payload["market_label"]
+
+    if force_summary or payload["market"] == "kr":
+        top = payload["items"]
+        if top:
+            title = f"📈 {label} 매수 후보 {payload['count']}건"
+            send_telegram(_build_message(payload, top, title))
+            send_email(f"[스크리너] {title} ({payload['data_date']})",
+                       _email_html(payload, top, title))
+        else:
+            send_telegram(f"<b>{label}</b> {payload['data_date']}\n"
+                          f"조건을 충족한 종목이 없습니다. 관망 구간입니다.")
+        return
+
+    # 코인: 신규 상위 등급 진입만 즉시 알림 (4시간마다 도배 방지)
+    if new_items:
+        title = f"🚨 {label} 신규 진입 {len(new_items)}건"
+        send_telegram(_build_message(payload, new_items, title))
+    else:
+        print("[notify] 신규 진입 종목 없음 → 알림 생략")

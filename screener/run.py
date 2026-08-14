@@ -1,0 +1,233 @@
+"""스크리너 엔트리포인트.
+
+사용법:
+  python -m screener.run --market kr          # 국내주식
+  python -m screener.run --market coin        # 업비트 코인
+  python -m screener.run --market coin --notify
+  python -m screener.run --market demo        # 합성 데이터로 파이프라인 점검
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import traceback
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+
+from . import cache
+from . import config as C
+from . import score as S
+
+KST = timezone(timedelta(hours=9))
+OUT_DIR = os.path.join("docs", "data")
+HIST_DIR = os.path.join(OUT_DIR, "history")
+
+MARKET_LABEL = {"kr": "국내주식", "coin": "코인(업비트)"}
+
+
+# ─────────────────────────────────────────────────────────
+def _write_json(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+    print(f"[out] {path} ({os.path.getsize(path)/1024:.0f} KB)")
+
+
+def _load_prev(market: str) -> dict:
+    p = os.path.join(OUT_DIR, f"{market}_latest.json")
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _diff_new(prev: dict, items: list[dict], grades=("S", "A")) -> list[dict]:
+    """직전 실행 대비 새로 상위 등급에 진입한 종목 (알림 스팸 방지)."""
+    old = {i["symbol"] for i in prev.get("items", []) if i.get("grade") in grades}
+    return [i for i in items if i["grade"] in grades and i["symbol"] not in old]
+
+
+# ─────────────────────────────────────────────────────────
+def screen_kr() -> dict:
+    from .sources import kr_stock
+
+    long_df = kr_stock.fetch_ohlcv()
+    last_date = pd.to_datetime(long_df["date"]).max()
+    date_str = last_date.strftime("%Y%m%d")
+
+    meta = kr_stock.fetch_meta(date_str)
+    excluded = kr_stock.excluded_tickers(date_str)
+    uni = kr_stock.apply_universe_filter(meta, excluded)
+
+    # 최신 거래일 거래대금으로 한 번 더 확인
+    last_rows = long_df[long_df["date"] == last_date].set_index("ticker")
+    frames = cache.to_frames(long_df[long_df["ticker"].isin(uni.index)])
+
+    items, errors = [], 0
+    for ticker, df in frames.items():
+        try:
+            if len(df) < C.MIN_BARS:
+                continue
+            res = S.evaluate({"1d": df, "1w": S.resample_weekly(df)}, "kr")
+            if res is None or res["score"] < C.MIN_OUTPUT_SCORE:
+                continue
+            info = uni.loc[ticker] if ticker in uni.index else None
+            res.update({
+                "symbol": ticker,
+                "name": str(info["name"]) if info is not None and "name" in info else ticker,
+                "market": str(info["market"]) if info is not None and "market" in info else "",
+                "turnover": float(last_rows.loc[ticker, "value"]) if ticker in last_rows.index else 0.0,
+                "marketcap": float(info["marketcap"]) if info is not None and "marketcap" in info else 0.0,
+                "link": f"https://m.stock.naver.com/domestic/stock/{ticker}/total",
+            })
+            items.append(res)
+        except Exception:
+            errors += 1
+            if errors <= 3:
+                traceback.print_exc()
+
+    print(f"[kr] 평가 {len(frames):,}종목 → 후보 {len(items):,} (오류 {errors})")
+    return _payload("kr", items, len(frames), str(last_date)[:10])
+
+
+def screen_coin() -> dict:
+    from .sources import upbit
+
+    uni = upbit.universe()
+    items, errors = [], 0
+    for market, row in uni.iterrows():
+        try:
+            frames = {}
+            for tf in ("4h", "1d", "1w"):
+                df = upbit.candles(market, tf, 200)
+                if not df.empty:
+                    frames[tf] = df
+            if "1d" not in frames or len(frames["1d"]) < C.COIN_MIN_LISTED_DAYS:
+                continue
+            res = S.evaluate(frames, "coin")
+            if res is None or res["score"] < C.MIN_OUTPUT_SCORE:
+                continue
+            res.update({
+                "symbol": market,
+                "name": str(row["name"]),
+                "market": "업비트 KRW",
+                "turnover": float(row["acc_trade_price_24h"]),
+                "marketcap": 0.0,
+                "link": f"https://upbit.com/exchange?code=CRIX.UPBIT.{market}",
+            })
+            items.append(res)
+        except Exception:
+            errors += 1
+            if errors <= 3:
+                traceback.print_exc()
+
+    print(f"[coin] 평가 {len(uni)}종목 → 후보 {len(items)} (오류 {errors})")
+    return _payload("coin", items, len(uni), datetime.now(KST).strftime("%Y-%m-%d"))
+
+
+def screen_demo() -> dict:
+    """네트워크 없이 파이프라인·대시보드를 점검하기 위한 합성 데이터."""
+    import numpy as np
+
+    rng = np.random.default_rng(7)
+    items = []
+    for i in range(24):
+        n = 260
+        drift = rng.normal(0.0012 if i % 3 == 0 else -0.0003, 0.001)
+        steps = rng.normal(drift, 0.022, n)
+        if i % 3 == 0:                       # 최근 상승 + 거래량 증가 종목
+            steps[-12:] += 0.012
+        close = 10000 * np.exp(np.cumsum(steps))
+        high = close * (1 + np.abs(rng.normal(0, 0.008, n)))
+        low = close * (1 - np.abs(rng.normal(0, 0.008, n)))
+        open_ = np.r_[close[0], close[:-1]]
+        vol = rng.lognormal(11, 0.4, n)
+        if i % 3 == 0:
+            vol[-3:] *= rng.uniform(1.8, 3.2)
+        idx = pd.bdate_range(end=datetime.now(), periods=n)
+        df = pd.DataFrame({"open": open_, "high": high, "low": low,
+                           "close": close, "volume": vol}, index=idx)
+        res = S.evaluate({"1d": df, "1w": S.resample_weekly(df)}, "kr")
+        if res is None or res["score"] < C.MIN_OUTPUT_SCORE:
+            continue
+        res.update({"symbol": f"00000{i:02d}", "name": f"샘플종목{i:02d}",
+                    "market": "KOSPI" if i % 2 else "KOSDAQ",
+                    "turnover": float(vol[-1] * close[-1]), "marketcap": 5e11,
+                    "link": "#"})
+        items.append(res)
+    return _payload("kr", items, 24, datetime.now(KST).strftime("%Y-%m-%d"))
+
+
+# ─────────────────────────────────────────────────────────
+def _payload(market: str, items: list[dict], scanned: int, data_date: str) -> dict:
+    items.sort(key=lambda x: x["score"], reverse=True)
+    counts = {}
+    for it in items:
+        counts[it["grade"]] = counts.get(it["grade"], 0) + 1
+    return {
+        "market": market,
+        "market_label": MARKET_LABEL.get(market, market),
+        "generated_at": datetime.now(KST).isoformat(timespec="seconds"),
+        "data_date": data_date,
+        "scanned": scanned,
+        "count": len(items),
+        "grade_counts": counts,
+        "weights": C.WEIGHTS,
+        "indicator_labels": C.INDICATOR_LABELS,
+        "grade_cuts": {g: c for g, c in C.GRADE_CUTS},
+        "items": items,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--market", required=True, choices=["kr", "coin", "demo"])
+    ap.add_argument("--notify", action="store_true", help="텔레그램/이메일 발송")
+    ap.add_argument("--daily-summary", action="store_true",
+                    help="신규 진입뿐 아니라 전체 요약을 강제로 발송")
+    args = ap.parse_args()
+
+    fn = {"kr": screen_kr, "coin": screen_coin, "demo": screen_demo}[args.market]
+    payload = fn()
+    market_key = payload["market"]
+
+    prev = _load_prev(market_key)
+    new_items = _diff_new(prev, payload["items"])
+    payload["new_entries"] = [i["symbol"] for i in new_items]
+
+    _write_json(os.path.join(OUT_DIR, f"{market_key}_latest.json"), payload)
+    # 히스토리 스냅샷 (나중에 적중률 검증용) — 상위 60종목만 경량 보관
+    slim = {k: v for k, v in payload.items() if k != "items"}
+    slim["items"] = [{k: it[k] for k in ("symbol", "name", "score", "grade", "price",
+                                         "change_pct", "risk")}
+                     for it in payload["items"][:60]]
+    _write_json(os.path.join(HIST_DIR, f"{market_key}_{payload['data_date']}.json"), slim)
+
+    # 인덱스(대시보드가 최근 갱신 시각을 알 수 있게)
+    index_path = os.path.join(OUT_DIR, "index.json")
+    idx = {}
+    if os.path.exists(index_path):
+        try:
+            idx = json.load(open(index_path, encoding="utf-8"))
+        except Exception:
+            idx = {}
+    idx[market_key] = {"generated_at": payload["generated_at"],
+                       "data_date": payload["data_date"],
+                       "count": payload["count"],
+                       "grade_counts": payload["grade_counts"]}
+    _write_json(index_path, idx)
+
+    if args.notify:
+        from . import notify
+        notify.dispatch(payload, new_items, force_summary=args.daily_summary)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

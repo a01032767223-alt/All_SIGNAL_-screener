@@ -1,0 +1,204 @@
+# 매수신호 자동 스크리너
+
+국내주식(KOSPI·KOSDAQ) 전종목과 업비트 KRW 코인을 매일 자동으로 훑어서
+**이동평균선 · 거래량 · 지지저항 · RSI · MACD · 볼린저밴드 · ADX · OBV** 8개 지표로
+점수를 매기고, 폰에서 볼 수 있는 대시보드와 텔레그램·이메일 알림으로 보내줍니다.
+
+서버가 필요 없습니다. GitHub Actions(무료)가 실행하고 GitHub Pages(무료)가 보여줍니다.
+
+---
+
+## 설치 — 처음 한 번만, 15분
+
+### 1단계. 리포지토리 만들기
+
+1. GitHub에서 **New repository** 클릭
+2. 이름: `signal-screener` (원하는 이름 가능)
+3. **Private** 선택해도 됩니다. 단, Pages를 무료로 쓰려면 **Public**이 편합니다.
+   (Private 리포의 Pages는 유료 플랜 필요 → **Public 권장**)
+4. README 추가 옵션은 **체크 해제**하고 생성
+
+### 2단계. 코드 올리기
+
+**방법 A — 명령어 (권장)**
+
+```bash
+cd signal-screener            # 압축을 푼 폴더로 이동
+git init
+git add .
+git commit -m "매수신호 스크리너 초기 설정"
+git branch -M main
+git remote add origin https://github.com/<내아이디>/signal-screener.git
+git push -u origin main
+```
+
+**방법 B — 웹에서 드래그**
+
+리포지토리 화면 → `uploading an existing file` → 폴더 안 파일 전체를 끌어다 놓기 →
+`Commit changes`
+※ `.github` 폴더는 숨김 폴더라 드래그로 누락되기 쉽습니다. 방법 A를 권합니다.
+
+### 3단계. GitHub Pages 켜기
+
+`Settings` → 왼쪽 `Pages` →
+- **Source**: `Deploy from a branch`
+- **Branch**: `main` / 폴더는 **`/docs`** 선택 → `Save`
+
+1~2분 뒤 주소가 나옵니다: `https://<내아이디>.github.io/signal-screener/`
+
+> **폴더를 `/docs`가 아니라 `/ (root)`로 설정해도 됩니다.**
+> 리포지토리 루트에 있는 `index.html`이 자동으로 `docs/`로 넘겨주므로 어느 쪽을 골라도 동작합니다.
+> (`/docs`를 고르면 루트의 `index.html`은 그냥 사용되지 않습니다)
+>
+> | Pages 폴더 설정 | 실제로 열리는 파일 | 대시보드 주소 |
+> |---|---|---|
+> | `/docs` (권장) | `docs/index.html` | `.../signal-screener/` |
+> | `/ (root)` | `index.html` → `docs/index.html`로 이동 | `.../signal-screener/` (자동 이동) |
+
+### 4단계. Actions 권한 열기
+
+`Settings` → `Actions` → `General` → 맨 아래 **Workflow permissions** →
+**Read and write permissions** 선택 → `Save`
+(결과 파일을 리포에 다시 커밋해야 하므로 필요합니다)
+
+### 5단계. 알림 설정
+
+`Settings` → `Secrets and variables` → `Actions` → `New repository secret`
+
+#### 텔레그램 (5분)
+1. 텔레그램에서 **@BotFather** 검색 → `/newbot` → 이름 정하고 나면
+   `123456:ABC-DEF...` 형태의 **토큰**을 줍니다
+2. 방금 만든 내 봇을 찾아 대화창을 열고 **아무 메시지나 한 번 보냅니다** (필수)
+3. 브라우저에서 아래 주소 접속 → `"chat":{"id":123456789` 숫자가 **채팅 ID**
+   `https://api.telegram.org/bot<토큰>/getUpdates`
+4. Secret 두 개 등록
+
+| 이름 | 값 |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | 1번의 토큰 |
+| `TELEGRAM_CHAT_ID` | 3번의 숫자 |
+
+#### 이메일 (Gmail)
+1. Google 계정 → 보안 → **2단계 인증**을 먼저 켜야 합니다
+2. [앱 비밀번호](https://myaccount.google.com/apppasswords) 생성 → 16자리 발급
+3. Secret 세 개 등록
+
+| 이름 | 값 |
+|---|---|
+| `GMAIL_USER` | 보내는 Gmail 주소 |
+| `GMAIL_APP_PASSWORD` | 16자리 앱 비밀번호 (띄어쓰기 제거) |
+| `MAIL_TO` | 받을 주소 (쉼표로 여러 개 가능) |
+
+#### 대시보드 링크 (알림에 첨부됨)
+같은 화면의 **Variables** 탭 → `New repository variable`
+
+| 이름 | 값 |
+|---|---|
+| `PAGES_URL` | `https://<내아이디>.github.io/signal-screener/` |
+
+> 설정하지 않은 채널은 조용히 건너뜁니다. 텔레그램만 써도 되고 둘 다 써도 됩니다.
+
+### 6단계. 첫 실행
+
+`Actions` 탭 → 왼쪽에서 **국내주식 스크리닝** → `Run workflow` → `Run workflow`
+
+첫 실행은 400영업일 데이터를 처음 받느라 **10~20분** 걸립니다.
+두 번째부터는 캐시가 있어 **1~3분**입니다.
+끝나면 텔레그램에 알림이 오고 대시보드에 결과가 뜹니다.
+
+코인도 동일하게 **코인 스크리닝** → `Run workflow` 로 한 번 돌려보세요.
+
+### 7단계. 폰 홈화면에 앱으로 추가
+
+- **아이폰**: Safari로 Pages 주소 접속 → 공유 버튼 → `홈 화면에 추가`
+- **안드로이드**: Chrome으로 접속 → 우측 상단 ⋮ → `앱 설치` 또는 `홈 화면에 추가`
+
+주소창 없이 앱처럼 열리고, 비행기 모드에서도 마지막 결과를 볼 수 있습니다.
+
+---
+
+## 자동 실행 시간 (한국시간)
+
+| 워크플로 | 시각 | 알림 |
+|---|---|---|
+| 국내주식 스크리닝 | 평일 16:10 | 텔레그램 + 이메일 (상위 10종목) |
+| 코인 스크리닝 | 4시간마다 (01·05·09·13·17·21시) | 신규 S/A 진입 시에만 |
+| 코인 일일 요약 | 09:05 | 텔레그램 + 이메일 |
+
+> GitHub Actions 크론은 서버 부하에 따라 **5~20분 늦게** 시작되는 일이 흔합니다. 정상입니다.
+
+---
+
+## 점수 체계
+
+| 영역 | 지표 | 가중치 | 핵심 조건 |
+|---|---|---|---|
+| 추세 | 이동평균선 | 25% | 20MA > 60MA + 가격이 20MA 위 |
+| 수급 | 거래량 | 20% | 상승 시 거래량 ≥ 평균의 1.5배 |
+| 가격구조 | 지지·저항 | 20% | 저항 돌파 또는 주요 지지선 반등 |
+| 모멘텀 | RSI | 10% | 30~50에서 상승 전환 |
+| 모멘텀 | MACD | 8% | 골든크로스 + 히스토그램 증가 |
+| 변동성 | 볼린저밴드 | 7% | 하단 반등 또는 수축 후 상단 돌파 |
+| 추세강도 | ADX | 5% | ADX > 20~25 + +DI > −DI |
+| 수급보조 | OBV | 5% | OBV 상승 추세 (매집) |
+
+각 지표는 O/X가 아니라 **0~100점의 연속값**으로 계산합니다. 그래야 순위가 의미를 갖습니다.
+등급은 **S 85+ / A 75+ / B 65+ / C 55+**.
+
+**타임프레임**: 국내주식은 일봉 70% + 주봉 30%, 코인은 4시간봉 25% + 일봉 50% + 주봉 25%.
+모든 타임프레임이 60점을 넘으면 **정렬 보너스 +5점**.
+
+---
+
+## 튜닝
+
+거의 모든 설정은 [`screener/config.py`](screener/config.py) 한 파일에 있습니다.
+
+```python
+WEIGHTS = {"ma": 25, "volume": 20, ...}   # 가중치 (합 100)
+GRADE_CUTS = [("S", 85), ("A", 75), ...]  # 등급 컷
+KR_MIN_MARKETCAP = 50_000_000_000         # 시총 500억 미만 제외
+KR_MIN_TURNOVER  = 100_000_000            # 거래대금 1억 미만 제외
+COIN_MIN_TURNOVER_24H = 500_000_000       # 코인 24h 거래대금 5억 미만 제외
+TF_WEIGHTS = {"kr": {"1d": 0.70, "1w": 0.30}, ...}
+```
+
+수정 후 push하면 다음 실행부터 바로 반영됩니다.
+지표별 점수 규칙 자체를 바꾸려면 [`screener/rules.py`](screener/rules.py)를 보세요.
+각 함수가 `(점수, 설명, 조건충족여부)`를 돌려주는 단순한 구조입니다.
+
+---
+
+## 로컬에서 돌려보기
+
+```bash
+pip install -r requirements.txt
+
+python tests/test_indicators.py          # 지표 로직 검증 (20개 테스트)
+python -m screener.run --market demo     # 합성 데이터로 대시보드 미리보기
+python -m screener.run --market kr       # 실제 국내주식 (첫 실행 10~20분)
+python -m screener.run --market coin     # 실제 코인
+
+cd docs && python -m http.server 8000    # → http://localhost:8000
+```
+
+---
+
+## 문제가 생기면
+
+| 증상 | 원인과 해결 |
+|---|---|
+| 대시보드가 "결과 파일이 없습니다" | 아직 워크플로를 한 번도 안 돌렸습니다. `Actions` → `Run workflow` |
+| 워크플로가 push 단계에서 실패 | 4단계(Workflow permissions → Read and write)를 안 했습니다 |
+| 코인 실행이 `HTTP 403/418`로 실패 | 업비트가 해외 서버 IP를 차단한 경우입니다. 로그를 보내주시면 빗썸/코인게코 소스로 교체해 드립니다 |
+| 텔레그램이 안 옴 | 봇에게 **먼저 메시지를 보냈는지** 확인하세요. 안 보내면 봇이 대화를 시작할 수 없습니다 |
+| 국내주식 실행이 매우 느림 | 첫 실행만 그렇습니다. Actions 캐시가 쌓이면 1~3분 |
+| 결과가 0건 | 하락장에서는 정상입니다. 대시보드 슬라이더를 55까지 내려보세요 |
+
+---
+
+## 면책
+
+지표는 모두 과거 가격의 함수라 급변 구간에서 후행합니다. 공시·실적·뉴스 등 재료는
+전혀 반영되지 않습니다. **이 도구는 후보를 좁히는 필터이지 매매 신호가 아닙니다.**
+최종 판단과 손절은 사용자 본인의 몫입니다.

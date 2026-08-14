@@ -1,165 +1,285 @@
-"""국내주식(KOSPI/KOSDAQ) 데이터 — pykrx(KRX 공식 데이터) 기반.
+"""국내주식(KOSPI/KOSDAQ) 데이터 수집.
 
-핵심: 전종목 하루치를 한 번의 호출로 받는다(get_market_ohlcv_by_ticker).
-따라서 400영업일 = 400콜. 첫 실행만 오래 걸리고 이후엔 캐시에 없는 날짜만 받는다.
+■ 왜 KRX를 안 쓰는가
+  2025-12-27부터 KRX 정보데이터시스템이 회원 로그인 필수로 전환되어
+  서버에서 직접 수집할 수 없다(로그인 없이 호출하면 JSON 대신 로그인 페이지가 온다).
+
+■ 실측 근거 (2026-08-14, GitHub Actions 러너 = 미국 IP)
+  ✅ FinanceDataReader 종목목록   0.8s   942종목
+  ✅ 야후 일괄 다운로드           1.1s   121일 × 4종목
+  ✅ 네이버 siseJson             0.9s   종목당
+  ❌ KRX 직접 호출 / pykrx        로그인 필요
+
+■ 구조
+  종목목록 : FinanceDataReader → (실패 시) 네이버 시가총액 페이지
+  일봉     : 야후 일괄 다운로드 → (수집률 저조 시) 네이버 siseJson 종목별
+
+  야후는 한 번에 수십 종목을 받아오므로 전종목이 수십 초면 끝난다.
+  덕분에 증분 캐시 없이 매번 전체를 새로 받아도 되고, 캐시 정합성 문제가 사라진다.
 """
 from __future__ import annotations
 
+import ast
 import time
 from datetime import datetime, timedelta
 
 import pandas as pd
+import requests
 
-from .. import cache
 from .. import config as C
 
-CACHE_NAME = "kr_ohlcv"
+UA = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    "Referer": "https://finance.naver.com/",
+}
+YAHOO_SUFFIX = {"KOSPI": ".KS", "KOSDAQ": ".KQ", "KONEX": ".KN"}
+CHUNK = 60          # 야후 일괄 요청당 종목 수
+OHLCV_COLS = ["open", "high", "low", "close", "volume"]
 
 
-def _stock():
-    from pykrx import stock  # 지연 import (테스트 환경에서 미설치여도 무방)
-    return stock
+# ─────────────────────────────────────────────────────────
+# 1. 종목 목록
+# ─────────────────────────────────────────────────────────
+def _universe_fdr() -> pd.DataFrame:
+    import FinanceDataReader as fdr
 
-
-def _ohlcv_by_ticker(stock, date_str: str) -> pd.DataFrame | None:
-    for fn in ("get_market_ohlcv_by_ticker", "get_market_ohlcv"):
-        f = getattr(stock, fn, None)
-        if f is None:
-            continue
-        try:
-            df = f(date_str, market="ALL")
-            if df is not None and not df.empty:
-                return df
-        except Exception:
-            continue
-    return None
-
-
-def _business_days(n_days: int) -> list[str]:
-    """최근 n_days 달력일 중 주말 제외 (휴장일은 조회 결과가 비어 자연히 걸러짐)."""
-    today = datetime.now()
-    out = []
-    for i in range(int(n_days * 1.45)):
-        d = today - timedelta(days=i)
-        if d.weekday() < 5:
-            out.append(d.strftime("%Y%m%d"))
-        if len(out) >= n_days:
-            break
-    return sorted(out)
-
-
-def fetch_ohlcv(history_days: int = C.HISTORY_DAYS, verbose: bool = True) -> pd.DataFrame:
-    """전종목 일봉 long-format DataFrame 반환 (캐시 증분 갱신)."""
-    stock = _stock()
-    old = cache.load(CACHE_NAME)
-    have = cache.cached_dates(CACHE_NAME)
-    want = _business_days(history_days)
-    todo = [d for d in want if d not in have]
-
-    if verbose:
-        print(f"[kr] 캐시 {len(have)}일 보유 · {len(todo)}일 신규 수집")
-
-    rows = []
-    for i, d in enumerate(todo, 1):
-        df = _ohlcv_by_ticker(stock, d)
-        if df is None or df.empty:
-            continue  # 휴장일
-        df = df.rename(columns={"시가": "open", "고가": "high", "저가": "low",
-                                "종가": "close", "거래량": "volume", "거래대금": "value"})
-        need = ["open", "high", "low", "close", "volume"]
-        if not all(c in df.columns for c in need):
-            continue
-        if "value" not in df.columns:
-            df["value"] = df["close"] * df["volume"]
-        sub = df[need + ["value"]].copy()
-        sub = sub[sub["close"] > 0]
-        sub["ticker"] = sub.index.astype(str)
-        sub["date"] = pd.to_datetime(d)
-        rows.append(sub.reset_index(drop=True))
-        if verbose and i % 25 == 0:
-            print(f"  ... {i}/{len(todo)}")
-        time.sleep(0.12)  # KRX 예의상 간격
-
-    new = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=cache.LONG_COLS)
-    allx = pd.concat([old, new], ignore_index=True) if not old.empty else new
-    if allx.empty:
-        raise RuntimeError("국내주식 데이터를 한 건도 받지 못했습니다 (KRX 응답 확인 필요)")
-    cache.save(CACHE_NAME, allx)
-    return allx
-
-
-def fetch_meta(date_str: str | None = None) -> pd.DataFrame:
-    """종목명·시가총액 등 메타 (1~2콜)."""
-    stock = _stock()
-    if date_str is None:
-        date_str = datetime.now().strftime("%Y%m%d")
-
-    names = pd.DataFrame()
-    for back in range(0, 10):
-        d = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=back)).strftime("%Y%m%d")
-        try:
-            cap = stock.get_market_cap_by_ticker(d, market="ALL")
-            if cap is not None and not cap.empty:
-                names = cap.rename(columns={"시가총액": "marketcap", "거래대금": "turnover"})
-                names.index = names.index.astype(str)
-                break
-        except Exception:
-            continue
-    if names.empty:
-        return pd.DataFrame(columns=["name", "marketcap", "turnover", "market"])
-
-    # 종목명 — 한 번의 호출로 전체 확보
-    try:
-        chg = stock.get_market_price_change_by_ticker(d, d, market="ALL")
-        name_map = chg["종목명"].astype(str).to_dict() if "종목명" in chg.columns else {}
-        name_map = {str(k): v for k, v in name_map.items()}
-    except Exception:
-        name_map = {}
-    names["name"] = [name_map.get(t, t) for t in names.index]
-
-    # 시장 구분
-    market_map = {}
+    frames = []
     for mk in ("KOSPI", "KOSDAQ"):
-        try:
-            for t in stock.get_market_ticker_list(d, market=mk):
-                market_map[str(t)] = mk
-        except Exception:
-            pass
-    names["market"] = [market_map.get(t, "") for t in names.index]
-
-    keep = [c for c in ("name", "marketcap", "turnover", "market") if c in names.columns]
-    return names[keep]
-
-
-def excluded_tickers(date_str: str | None = None) -> set:
-    """ETF·ETN·ELW 등 지표 해석이 다른 종목 제외."""
-    stock = _stock()
-    if date_str is None:
-        date_str = datetime.now().strftime("%Y%m%d")
-    out = set()
-    for fn in ("get_etf_ticker_list", "get_etn_ticker_list", "get_elw_ticker_list"):
-        f = getattr(stock, fn, None)
-        if f is None:
+        df = fdr.StockListing(mk)
+        if df is None or df.empty:
             continue
-        try:
-            out |= {str(t) for t in f(date_str)}
-        except Exception:
-            pass
+        df = df.copy()
+        df.columns = [str(c) for c in df.columns]
+        if "Market" not in df.columns:
+            df["Market"] = mk
+        frames.append(df)
+    if not frames:
+        raise RuntimeError("FinanceDataReader 종목목록이 비어 있습니다")
+
+    all_df = pd.concat(frames, ignore_index=True)
+    out = pd.DataFrame({
+        "name": all_df.get("Name", pd.Series(dtype=object)).astype(str),
+        "market": all_df["Market"].astype(str),
+    })
+    out.index = all_df["Code"].astype(str).str.zfill(6)
+    out.index.name = "code"
+
+    # 시가총액 컬럼명이 버전에 따라 다르다
+    for cand in ("Marcap", "MarketCap", "Marketcap", "시가총액"):
+        if cand in all_df.columns:
+            out["marketcap"] = pd.to_numeric(all_df[cand], errors="coerce").values
+            break
+    for cand in ("Amount", "거래대금"):
+        if cand in all_df.columns:
+            out["turnover"] = pd.to_numeric(all_df[cand], errors="coerce").values
+            break
+
+    out = out[~out.index.duplicated(keep="first")]
+    print(f"[kr] 종목목록(FinanceDataReader): {len(out):,}종목 "
+          f"(시가총액 {'있음' if 'marketcap' in out else '없음'})")
     return out
 
 
-def apply_universe_filter(meta: pd.DataFrame, excluded: set) -> pd.DataFrame:
-    """시총·거래대금·종목명 패턴 기본 필터."""
-    df = meta.copy()
-    before = len(df)
-    if "marketcap" in df.columns:
-        df = df[df["marketcap"] >= C.KR_MIN_MARKETCAP]
-    if "turnover" in df.columns:
-        df = df[df["turnover"] >= C.KR_MIN_TURNOVER]
-    df = df[~df.index.isin(excluded)]
-    if "name" in df.columns:
-        pat = "|".join(C.KR_EXCLUDE_PATTERNS)
-        df = df[~df["name"].astype(str).str.contains(pat, na=False)]
-        df = df[~df["name"].astype(str).str.endswith("우")]
-    print(f"[kr] 유니버스 필터: {before:,} → {len(df):,}종목")
+def _universe_naver() -> pd.DataFrame:
+    """FDR이 실패했을 때 쓰는 대체 경로 — 네이버 시가총액 페이지."""
+    rows = []
+    for sosok, market in ((0, "KOSPI"), (1, "KOSDAQ")):
+        for page in range(1, 35):
+            r = requests.get("https://finance.naver.com/sise/sise_market_sum.naver",
+                             params={"sosok": sosok, "page": page},
+                             headers=UA, timeout=15)
+            r.encoding = "euc-kr"
+            try:
+                tables = pd.read_html(r.text)
+            except ValueError:
+                break
+            tbl = max(tables, key=len) if tables else None
+            if tbl is None or "종목명" not in tbl.columns:
+                break
+            tbl = tbl.dropna(subset=["종목명"])
+            if tbl.empty:
+                break
+            codes = pd.Series(r.text).str.extractall(r"/item/main\.naver\?code=(\d{6})")[0]
+            codes = codes.drop_duplicates().tolist()
+            names = tbl["종목명"].astype(str).tolist()
+            cap = (tbl["시가총액"] * 1e8).tolist() if "시가총액" in tbl.columns else [None] * len(names)
+            for code, nm, mc in zip(codes, names, cap):
+                rows.append({"code": code, "name": nm, "market": market, "marketcap": mc})
+            time.sleep(0.2)
+    if not rows:
+        raise RuntimeError("네이버 종목목록도 받지 못했습니다")
+    out = pd.DataFrame(rows).drop_duplicates(subset="code").set_index("code")
+    print(f"[kr] 종목목록(네이버 대체): {len(out):,}종목")
+    return out
+
+
+def fetch_universe() -> pd.DataFrame:
+    try:
+        return _universe_fdr()
+    except Exception as e:
+        print(f"[kr] FinanceDataReader 실패 → 네이버로 전환: {type(e).__name__}: {e}")
+        return _universe_naver()
+
+
+def apply_name_filters(uni: pd.DataFrame) -> pd.DataFrame:
+    """우선주·스팩·리츠 등 지표 해석이 다른 종목 제외 + 시가총액 하한."""
+    df, before = uni.copy(), len(uni)
+
+    names = df["name"].astype(str)
+    pat = "|".join(C.KR_EXCLUDE_PATTERNS)
+    df = df[~names.str.contains(pat, na=False, regex=True)]
+    df = df[~df["name"].astype(str).str.fullmatch(r".*[0-9]?우(B|C)?")]
+
+    if "marketcap" in df.columns and df["marketcap"].notna().any():
+        df = df[(df["marketcap"].isna()) | (df["marketcap"] >= C.KR_MIN_MARKETCAP)]
+
+    print(f"[kr] 종목명·시가총액 필터: {before:,} → {len(df):,}종목")
     return df
+
+
+# ─────────────────────────────────────────────────────────
+# 2. 일봉 — 야후 일괄 다운로드
+# ─────────────────────────────────────────────────────────
+def _yahoo_symbol(code: str, market: str) -> str:
+    return f"{code}{YAHOO_SUFFIX.get(market, '.KS')}"
+
+
+def _tidy(df: pd.DataFrame) -> pd.DataFrame | None:
+    """야후 응답 한 종목분을 표준 OHLCV로 정리."""
+    if df is None or df.empty:
+        return None
+    df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                            "Close": "close", "Volume": "volume"})
+    if not all(c in df.columns for c in OHLCV_COLS):
+        return None
+    out = df[OHLCV_COLS].astype("float64").dropna(subset=["close"])
+    out = out[out["close"] > 0]
+    out.index = pd.to_datetime(out.index).tz_localize(None)
+    return out[~out.index.duplicated(keep="last")].sort_index() if len(out) else None
+
+
+def fetch_ohlcv_yahoo(uni: pd.DataFrame, days: int = C.HISTORY_DAYS,
+                      verbose: bool = True) -> dict[str, pd.DataFrame]:
+    import yfinance as yf
+
+    start = (datetime.now() - timedelta(days=int(days * 1.5))).strftime("%Y-%m-%d")
+    sym_to_code = {_yahoo_symbol(c, m): c for c, m in uni["market"].items()}
+    symbols = list(sym_to_code)
+    frames: dict[str, pd.DataFrame] = {}
+
+    for i in range(0, len(symbols), CHUNK):
+        batch = symbols[i:i + CHUNK]
+        try:
+            raw = yf.download(batch, start=start, interval="1d", group_by="ticker",
+                              auto_adjust=False, actions=False, progress=False,
+                              threads=True, timeout=30)
+        except Exception as e:
+            print(f"[kr] 배치 {i // CHUNK + 1} 실패: {type(e).__name__}: {e}")
+            continue
+        if raw is None or raw.empty:
+            continue
+
+        for sym in batch:
+            try:
+                sub = raw[sym] if isinstance(raw.columns, pd.MultiIndex) else raw
+            except KeyError:
+                continue
+            tidy = _tidy(sub)
+            if tidy is not None and len(tidy) >= C.MIN_BARS:
+                frames[sym_to_code[sym]] = tidy
+
+        if verbose and (i // CHUNK) % 5 == 0:
+            print(f"  ... {min(i + CHUNK, len(symbols))}/{len(symbols)}종목 "
+                  f"(누적 {len(frames)}종목 확보)", flush=True)
+
+    rate = len(frames) / max(1, len(symbols)) * 100
+    print(f"[kr] 야후 수집 완료: {len(frames):,}/{len(symbols):,}종목 ({rate:.0f}%)")
+    return frames
+
+
+# ─────────────────────────────────────────────────────────
+# 3. 일봉 — 네이버 (야후 실패 시 대체)
+# ─────────────────────────────────────────────────────────
+def _naver_ohlcv(code: str, days: int) -> pd.DataFrame | None:
+    end = datetime.now()
+    start = end - timedelta(days=int(days * 1.5))
+    r = requests.get("https://api.finance.naver.com/siseJson.naver",
+                     params={"symbol": code, "requestType": 1,
+                             "startTime": start.strftime("%Y%m%d"),
+                             "endTime": end.strftime("%Y%m%d"),
+                             "timeframe": "day"},
+                     headers=UA, timeout=15)
+    body = r.text.strip()
+    if not body.startswith("["):
+        return None
+    # 응답은 JSON이 아니라 파이썬 리터럴 형태(작은따옴표)라 literal_eval로 읽는다
+    rows = ast.literal_eval(body)
+    if len(rows) < 2:
+        return None
+    df = pd.DataFrame(rows[1:], columns=rows[0])
+    df = df.rename(columns={"날짜": "date", "시가": "open", "고가": "high",
+                            "저가": "low", "종가": "close", "거래량": "volume"})
+    if "date" not in df.columns:
+        return None
+    df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d", errors="coerce")
+    df = df.dropna(subset=["date"]).set_index("date")
+    return _tidy(df.rename(columns=str.title))
+
+
+def fetch_ohlcv_naver(codes: list[str], days: int = C.HISTORY_DAYS,
+                      verbose: bool = True) -> dict[str, pd.DataFrame]:
+    frames, fails = {}, 0
+    for i, code in enumerate(codes, 1):
+        try:
+            df = _naver_ohlcv(code, days)
+            if df is not None and len(df) >= C.MIN_BARS:
+                frames[code] = df
+        except Exception:
+            fails += 1
+            if fails > 40 and fails > i * 0.5:
+                print(f"[kr] 네이버 연속 실패 과다({fails}건) → 중단")
+                break
+        if verbose and i % 200 == 0:
+            print(f"  ... {i}/{len(codes)}종목 (확보 {len(frames)})", flush=True)
+        time.sleep(0.12)
+    print(f"[kr] 네이버 수집 완료: {len(frames):,}/{len(codes):,}종목")
+    return frames
+
+
+# ─────────────────────────────────────────────────────────
+# 4. 통합 진입점
+# ─────────────────────────────────────────────────────────
+def load(days: int = C.HISTORY_DAYS) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
+    """(종목별 일봉, 종목 메타) 반환. 소스 장애 시 자동으로 대체 경로를 탄다."""
+    uni = apply_name_filters(fetch_universe())
+
+    frames, source = {}, "yahoo"
+    try:
+        frames = fetch_ohlcv_yahoo(uni, days)
+    except Exception as e:
+        print(f"[kr] 야후 전체 실패: {type(e).__name__}: {e}")
+
+    # 수집률이 절반도 안 되면 야후가 국내 종목을 제대로 못 주는 상황 → 네이버로 재시도
+    if len(frames) < len(uni) * 0.5:
+        print(f"[kr] 야후 수집률 저조({len(frames)}/{len(uni)}) → 네이버로 재시도")
+        naver_frames = fetch_ohlcv_naver([c for c in uni.index if c not in frames], days)
+        if naver_frames:
+            frames.update(naver_frames)
+            source = "yahoo+naver" if len(frames) > len(naver_frames) else "naver"
+
+    if not frames:
+        raise RuntimeError(
+            "국내주식 일봉을 한 건도 받지 못했습니다. "
+            "야후·네이버 양쪽 모두 실패 — 진단 워크플로(데이터소스 진단)를 실행해 보세요.")
+
+    # 거래대금(종가×거래량) 하한 — 종목목록에 거래대금이 없어도 여기서 걸러진다
+    turnover = {c: float(df["close"].iloc[-1] * df["volume"].iloc[-1]) for c, df in frames.items()}
+    keep = [c for c, v in turnover.items() if v >= C.KR_MIN_TURNOVER]
+    print(f"[kr] 거래대금 필터({C.KR_MIN_TURNOVER/1e8:.0f}억 이상): "
+          f"{len(frames):,} → {len(keep):,}종목")
+
+    meta = uni.loc[[c for c in keep if c in uni.index]].copy()
+    meta["turnover"] = [turnover[c] for c in meta.index]
+    meta["source"] = source
+    return {c: frames[c] for c in meta.index}, meta

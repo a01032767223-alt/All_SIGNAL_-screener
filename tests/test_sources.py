@@ -73,20 +73,7 @@ def test_upbit_candle_parsing():
     assert (df["high"] >= df["low"]).all()
 
 
-def test_kr_universe_filter():
-    """시총·거래대금·우선주/스팩 제외가 실제로 걸러내는지."""
-    from screener import config as C
-    from screener.sources import kr_stock
-
-    meta = pd.DataFrame(
-        {"name": ["정상종목", "소형주", "저거래", "삼성전자우", "케이스팩1호", "ETF상품"],
-         "marketcap": [1e12, 1e10, 1e12, 1e12, 1e12, 1e12],
-         "turnover": [1e9, 1e9, 1e7, 1e9, 1e9, 1e9],
-         "market": ["KOSPI"] * 6},
-        index=["000001", "000002", "000003", "000004", "000005", "000006"])
-
-    out = kr_stock.apply_universe_filter(meta, excluded={"000006"})
-    assert list(out.index) == ["000001"], list(out.index)
+# 국내주식 소스(야후·네이버·필터) 검증은 tests/test_kr_source.py 에 있습니다.
 
 
 if __name__ == "__main__":

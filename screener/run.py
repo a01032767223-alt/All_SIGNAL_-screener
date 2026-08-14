@@ -16,7 +16,6 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from . import cache
 from . import config as C
 from . import score as S
 
@@ -56,33 +55,25 @@ def _diff_new(prev: dict, items: list[dict], grades=("S", "A")) -> list[dict]:
 def screen_kr() -> dict:
     from .sources import kr_stock
 
-    long_df = kr_stock.fetch_ohlcv()
-    last_date = pd.to_datetime(long_df["date"]).max()
-    date_str = last_date.strftime("%Y%m%d")
+    frames, meta = kr_stock.load()
 
-    meta = kr_stock.fetch_meta(date_str)
-    excluded = kr_stock.excluded_tickers(date_str)
-    uni = kr_stock.apply_universe_filter(meta, excluded)
-
-    # 최신 거래일 거래대금으로 한 번 더 확인
-    last_rows = long_df[long_df["date"] == last_date].set_index("ticker")
-    frames = cache.to_frames(long_df[long_df["ticker"].isin(uni.index)])
-
-    items, errors = [], 0
+    items, errors, last_date = [], 0, None
     for ticker, df in frames.items():
         try:
             if len(df) < C.MIN_BARS:
                 continue
             res = S.evaluate({"1d": df, "1w": S.resample_weekly(df)}, "kr")
+            if last_date is None or df.index[-1] > last_date:
+                last_date = df.index[-1]
             if res is None or res["score"] < C.MIN_OUTPUT_SCORE:
                 continue
-            info = uni.loc[ticker] if ticker in uni.index else None
+            info = meta.loc[ticker]
             res.update({
                 "symbol": ticker,
-                "name": str(info["name"]) if info is not None and "name" in info else ticker,
-                "market": str(info["market"]) if info is not None and "market" in info else "",
-                "turnover": float(last_rows.loc[ticker, "value"]) if ticker in last_rows.index else 0.0,
-                "marketcap": float(info["marketcap"]) if info is not None and "marketcap" in info else 0.0,
+                "name": str(info.get("name", ticker)),
+                "market": str(info.get("market", "")),
+                "turnover": float(info.get("turnover", 0.0) or 0.0),
+                "marketcap": float(info.get("marketcap", 0.0) or 0.0),
                 "link": f"https://m.stock.naver.com/domestic/stock/{ticker}/total",
             })
             items.append(res)
@@ -91,8 +82,10 @@ def screen_kr() -> dict:
             if errors <= 3:
                 traceback.print_exc()
 
+    data_date = str(last_date)[:10] if last_date is not None else \
+        datetime.now(KST).strftime("%Y-%m-%d")
     print(f"[kr] 평가 {len(frames):,}종목 → 후보 {len(items):,} (오류 {errors})")
-    return _payload("kr", items, len(frames), str(last_date)[:10])
+    return _payload("kr", items, len(frames), data_date)
 
 
 def screen_coin() -> dict:

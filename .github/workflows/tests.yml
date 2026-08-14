@@ -1,0 +1,24 @@
+name: 지표 로직 테스트
+
+on:
+  push:
+    paths:
+      - "screener/**"
+      - "tests/**"
+      - ".github/workflows/tests.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install pandas numpy requests pyarrow
+      - run: python tests/test_indicators.py
+      - run: python tests/test_sources.py
+      - name: 합성 데이터 파이프라인 점검
+        run: python -m screener.run --market demo

@@ -1,1 +1,60 @@
+name: 코인 스크리닝
 
+on:
+  schedule:
+    # 4시간마다 (UTC 00/04/08/12/16/20시 05분 = KST 09/13/17/21/01/05시)
+    - cron: "5 */4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: screen-coin
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 스크리닝 실행
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          PAGES_URL: ${{ vars.PAGES_URL }}
+        run: |
+          # KST 09시 실행분만 전체 요약 발송, 나머지는 신규 진입만 알림
+          if [ "$(date -u +%H)" = "00" ]; then
+            python -m screener.run --market coin --notify --daily-summary
+          else
+            python -m screener.run --market coin --notify
+          fi
+
+      - name: 결과 커밋
+        run: |
+          git config user.name "screener-bot"
+          git config user.email "actions@github.com"
+          git add docs/data
+          if git diff --cached --quiet; then
+            echo "변경 없음"
+          else
+            git commit -m "코인 스크리닝 $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M')"
+            for i in 1 2 3; do
+              git pull --rebase --autostash origin ${{ github.ref_name }} && \
+              git push && break || sleep 5
+            done
+          fi

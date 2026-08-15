@@ -17,6 +17,31 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from screener import run as RUN
+from screener import notify as N
+
+# 이 파일은 RUN.screen_us/kr/coin/demo와 N.dispatch를 가짜로 갈아끼운다.
+# pytest는 모든 테스트 파일을 한 프로세스에서 돌리므로, 복원하지 않으면 다른
+# 테스트 파일이 이 가짜 함수를 이어받아 엉뚱하게 통과·실패한다.
+_ORIGINALS = {"screen_us": RUN.screen_us, "screen_kr": RUN.screen_kr,
+             "screen_coin": RUN.screen_coin, "screen_demo": RUN.screen_demo}
+_N_ORIGINALS = {"dispatch": N.dispatch}
+
+try:
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def _restore_module():
+        for n, v in _ORIGINALS.items():
+            setattr(RUN, n, v)
+        for n, v in _N_ORIGINALS.items():
+            setattr(N, n, v)
+        yield
+        for n, v in _ORIGINALS.items():
+            setattr(RUN, n, v)
+        for n, v in _N_ORIGINALS.items():
+            setattr(N, n, v)
+except ImportError:            # pytest 없이 직접 실행할 때는 아래 __main__ 루프가 처리
+    pass
 
 
 class _Chdir:
@@ -137,11 +162,19 @@ if __name__ == "__main__":
     fails = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
+            for n, v in _ORIGINALS.items():
+                setattr(RUN, n, v)
+            for n, v in _N_ORIGINALS.items():
+                setattr(N, n, v)
             try:
                 fn()
                 print(f"  PASS  {name}")
             except AssertionError as e:
                 fails += 1
                 print(f"  FAIL  {name}: {e}")
+    for n, v in _ORIGINALS.items():
+        setattr(RUN, n, v)
+    for n, v in _N_ORIGINALS.items():
+        setattr(N, n, v)
     print("\n실패" if fails else "\n전체 통과", f"({fails} failed)")
     raise SystemExit(1 if fails else 0)

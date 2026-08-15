@@ -134,6 +134,7 @@ def screen_coin() -> dict:
     from .sources import upbit
 
     uni = upbit.universe()
+
     items, errors = [], 0
     for market, row in uni.iterrows():
         try:
@@ -204,15 +205,16 @@ def screen_demo() -> dict:
 # ─────────────────────────────────────────────────────────
 def _payload(market: str, items: list[dict], scanned: int, data_date: str) -> dict:
     items.sort(key=lambda x: x["score"], reverse=True)
-    counts = {}
+
+    counts: dict[str, int] = {}
     for it in items:
         counts[it["grade"]] = counts.get(it["grade"], 0) + 1
-
     total_found = len(items)
-    truncated = max(0, total_found - C.MAX_OUTPUT_ITEMS)
+
+    truncated = max(0, len(items) - C.MAX_OUTPUT_ITEMS)
     if truncated:
         # 조용히 잘라내지 않고 몇 건을 뺐는지 남깁니다
-        print(f"[out] 후보 {total_found:,}건 중 상위 {C.MAX_OUTPUT_ITEMS}건만 저장 "
+        print(f"[out] 후보 {len(items):,}건 중 상위 {C.MAX_OUTPUT_ITEMS}건만 저장 "
               f"({truncated:,}건 제외, 최저 점수 {items[C.MAX_OUTPUT_ITEMS - 1]['score']:.1f})")
         items = items[:C.MAX_OUTPUT_ITEMS]
 

@@ -212,6 +212,58 @@ def test_evaluate_end_to_end():
     assert len(res["checks"]) == 8
 
 
+def test_sell_signals_silent_on_clean_uptrend():
+    """정배열 상승만 있는 종목은 매도 경고가 없어야 한다."""
+    n = 220
+    base = np.linspace(100, 180, n) + np.sin(np.arange(n) / 9) * 1.5
+    close = base.copy()
+    close[-1] = base[-2] * 1.03
+    vol = np.full(n, 1000.0)
+    vol[-1] = 2500.0
+    df = pd.DataFrame({"open": np.r_[close[0], close[:-1]], "high": close * 1.01,
+                       "low": close * 0.99, "close": close, "volume": vol},
+                      index=pd.bdate_range(end="2026-08-14", periods=n))
+    warns = R.sell_signals(I.enrich(df))
+    assert warns == [], warns
+
+
+def test_sell_signals_fire_on_clean_downtrend():
+    n = 220
+    close = np.linspace(200, 100, n)
+    df = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99,
+                       "close": close, "volume": np.full(n, 1000.0)},
+                      index=pd.bdate_range(end="2026-08-14", periods=n))
+    warns = R.sell_signals(I.enrich(df))
+    keys = {w["key"] for w in warns}
+    assert {"ma_dead", "structure_break", "adx_bear", "obv_dump"} <= keys, keys
+    for w in warns:
+        assert set(w) == {"key", "label", "detail", "help"}
+
+
+def test_sell_signals_catch_topping_pattern_that_still_passes_score():
+    """추세는 아직 매수 조건을 충족하지만 최근 과열 후 꺾인 종목.
+
+    이게 이 기능의 존재 이유다 — 총점만으로는 걸러지지 않는 '천장 근처' 종목을
+    경고로 잡아내야 한다.
+    """
+    n = 220
+    up = np.linspace(100, 220, n - 8)
+    close = np.r_[up, up[-1] * np.array([1.06, 1.09, 1.11, 1.10, 1.08, 1.06, 1.05, 1.03])]
+    df = pd.DataFrame({"open": np.r_[close[0], close[:-1]], "high": close * 1.01,
+                       "low": close * 0.99, "close": close, "volume": np.full(n, 1000.0)},
+                      index=pd.bdate_range(end="2026-08-14", periods=n))
+    edf = I.enrich(df)
+    res = R.score_all(edf)
+    warns = R.sell_signals(edf)
+    assert res["total"] >= C.MIN_OUTPUT_SCORE, \
+        "이 테스트는 '통과하는데 경고가 뜨는' 상황을 재현해야 의미가 있다"
+    assert len(warns) >= 1, "과열 후 꺾인 흐름인데 경고가 하나도 없다"
+
+
+def test_sell_signals_needs_min_history():
+    assert R.sell_signals(I.enrich(_synth(5, seed=1))) == []
+
+
 def test_evaluate_missing_daily_returns_none():
     df = _synth(400, seed=31)
     assert S.evaluate({"1w": S.resample_weekly(df)}, "kr") is None

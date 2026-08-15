@@ -1,10 +1,13 @@
 name: 데이터소스 진단
 
-# 국내주식 데이터를 어디서 받을 수 있는지 GitHub 서버에서 직접 확인합니다.
+# 국내주식·미국주식·코인 데이터를 어디서 받을 수 있는지 GitHub 서버에서 직접 확인합니다.
 # Actions 탭 → "데이터소스 진단" → Run workflow → 끝나면 로그를 복사해서 보내주세요.
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   probe:
@@ -121,7 +124,49 @@ jobs:
               return f"{len(df)}종목"
           probe("pykrx (로그인 없이)", pykrx_call)
 
-          print("\n===== 3. 코인 소스 =====", flush=True)
+          print("\n===== 3. 미국주식 소스 =====", flush=True)
+
+          def us_sp500_fdr():
+              import FinanceDataReader as fdr
+              df = fdr.StockListing("S&P500")
+              return f"{len(df)}종목, 컬럼 {list(df.columns)[:6]}"
+          probe("FinanceDataReader S&P500 목록", us_sp500_fdr)
+
+          def us_sp500_csv():
+              url = ("https://raw.githubusercontent.com/datasets/s-and-p-500-companies"
+                     "/main/data/constituents.csv")
+              r = requests.get(url, headers=UA, timeout=20)
+              if r.status_code != 200:
+                  raise RuntimeError(f"HTTP {r.status_code}")
+              return f"HTTP 200, {r.text.count(chr(10)) - 1}행 (대체 경로)"
+          probe("S&P500 목록 대체(GitHub CSV)", us_sp500_csv)
+
+          def us_ndx_wiki():
+              r = requests.get("https://en.wikipedia.org/wiki/Nasdaq-100", headers=UA, timeout=20)
+              if r.status_code != 200:
+                  raise RuntimeError(f"HTTP {r.status_code}")
+              return f"HTTP 200, {len(r.text):,}바이트"
+          probe("나스닥100 목록(위키백과)", us_ndx_wiki)
+
+          def us_exchange_dir():
+              r = requests.get("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
+                               headers=UA, timeout=20)
+              if r.status_code != 200:
+                  raise RuntimeError(f"HTTP {r.status_code}")
+              return f"HTTP 200, {len(r.text.splitlines())}행 (거래소 매핑용)"
+          probe("나스닥 심볼 디렉터리", us_exchange_dir)
+
+          def us_yahoo_batch():
+              import yfinance as yf
+              df = yf.download(["AAPL", "MSFT", "NVDA", "BRK-B"], period="6mo", interval="1d",
+                               group_by="ticker", auto_adjust=False, progress=False, threads=True)
+              if df.empty:
+                  raise RuntimeError("빈 결과")
+              cols = {c[0] for c in df.columns}
+              return f"{len(df)}일 × {len(cols)}종목 ({sorted(cols)})"
+          probe("yfinance 미국주식 일괄 (4종목)", us_yahoo_batch)
+
+          print("\n===== 4. 코인 소스 =====", flush=True)
 
           def upbit_markets():
               r = requests.get("https://api.upbit.com/v1/market/all",

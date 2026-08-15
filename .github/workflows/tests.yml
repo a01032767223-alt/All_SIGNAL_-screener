@@ -8,6 +8,11 @@ on:
       - ".github/workflows/tests.yml"
   workflow_dispatch:
 
+# 이 워크플로는 아무것도 커밋하지 않습니다. 기본 권한(리포에 따라 쓰기)을 그대로
+# 물려받지 않도록 읽기로 좁힙니다 — 서드파티 패키지가 토큰에 닿지 못하게.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -17,8 +22,11 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install pandas numpy requests pyarrow
+      - run: pip install -r requirements.txt
       - run: python tests/test_indicators.py
       - run: python tests/test_sources.py
+      - run: python tests/test_kr_source.py
+      - run: python tests/test_us_source.py
+      - run: python tests/test_pipeline.py
       - name: 합성 데이터 파이프라인 점검
         run: python -m screener.run --market demo

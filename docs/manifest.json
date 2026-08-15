@@ -1,7 +1,7 @@
 {
   "name": "매수신호 스크리너",
   "short_name": "스크리너",
-  "description": "국내주식·코인 매수 조건 자동 스크리닝",
+  "description": "국내주식·미국주식·코인 매수 조건 자동 스크리닝",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

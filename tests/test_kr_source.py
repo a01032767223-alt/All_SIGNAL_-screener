@@ -16,7 +16,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
 
-from screener import config as C
 from screener.sources import kr_stock as K
 
 
@@ -186,7 +185,6 @@ def test_load_turnover_filter():
 
 
 if __name__ == "__main__":
-    import copy
     originals = {n: getattr(K, n) for n in
                  ("fetch_universe", "fetch_ohlcv_yahoo", "fetch_ohlcv_naver", "requests")}
     fails = 0

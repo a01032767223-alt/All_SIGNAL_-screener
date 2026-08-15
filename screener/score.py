@@ -44,7 +44,10 @@ def risk_levels(edf: pd.DataFrame) -> dict:
     prior_high = R._f(cur.get("prior_high"), float("nan"))
     rr2_target = close + C.MIN_RR * risk
     if not math.isnan(prior_high) and prior_high > close * 1.005:
-        target = prior_high
+        # 직전 고점을 1차 목표로 삼되 상한을 둔다. 고점 대비 반토막 난 종목은
+        # 목표가가 현재가의 2배로 잡혀 손익비가 10을 넘고, 그 숫자만 보면
+        # '아주 좋은 자리'처럼 읽힌다. 1차 목표는 도달 가능한 거리여야 한다.
+        target = min(prior_high, close + C.MAX_RR_TARGET * risk)
     else:
         target = rr2_target
     rr = (target - close) / risk if risk > 0 else 0.0

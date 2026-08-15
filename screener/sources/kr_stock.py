@@ -27,6 +27,12 @@ import pandas as pd
 import requests
 
 from .. import config as C
+# 야후 수집 경로는 미국주식과 완전히 같은 로직이라 공통부에서 가져다 쓴다
+from ._yahoo import CHUNK, OHLCV_COLS, batch_download, tidy as _tidy
+
+# CHUNK·OHLCV_COLS는 이 모듈의 이름으로도 참조되므로 재수출임을 명시한다
+__all__ = ["CHUNK", "OHLCV_COLS", "YAHOO_SUFFIX", "fetch_universe",
+           "apply_name_filters", "fetch_ohlcv_yahoo", "fetch_ohlcv_naver", "load"]
 
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -34,8 +40,6 @@ UA = {
     "Referer": "https://finance.naver.com/",
 }
 YAHOO_SUFFIX = {"KOSPI": ".KS", "KOSDAQ": ".KQ", "KONEX": ".KN"}
-CHUNK = 60          # 야후 일괄 요청당 종목 수
-OHLCV_COLS = ["open", "high", "low", "close", "volume"]
 
 
 # ─────────────────────────────────────────────────────────
@@ -145,57 +149,14 @@ def _yahoo_symbol(code: str, market: str) -> str:
     return f"{code}{YAHOO_SUFFIX.get(market, '.KS')}"
 
 
-def _tidy(df: pd.DataFrame) -> pd.DataFrame | None:
-    """야후 응답 한 종목분을 표준 OHLCV로 정리."""
-    if df is None or df.empty:
-        return None
-    df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
-                            "Close": "close", "Volume": "volume"})
-    if not all(c in df.columns for c in OHLCV_COLS):
-        return None
-    out = df[OHLCV_COLS].astype("float64").dropna(subset=["close"])
-    out = out[out["close"] > 0]
-    out.index = pd.to_datetime(out.index).tz_localize(None)
-    return out[~out.index.duplicated(keep="last")].sort_index() if len(out) else None
-
-
 def fetch_ohlcv_yahoo(uni: pd.DataFrame, days: int = C.HISTORY_DAYS,
                       verbose: bool = True) -> dict[str, pd.DataFrame]:
-    import yfinance as yf
-
+    """야후 일괄 다운로드. 배치 루프 자체는 미국주식과 공통부를 쓴다."""
     start = (datetime.now() - timedelta(days=int(days * 1.5))).strftime("%Y-%m-%d")
     sym_to_code = {_yahoo_symbol(c, m): c for c, m in uni["market"].items()}
-    symbols = list(sym_to_code)
-    frames: dict[str, pd.DataFrame] = {}
-
-    for i in range(0, len(symbols), CHUNK):
-        batch = symbols[i:i + CHUNK]
-        try:
-            raw = yf.download(batch, start=start, interval="1d", group_by="ticker",
-                              auto_adjust=False, actions=False, progress=False,
-                              threads=True, timeout=30)
-        except Exception as e:
-            print(f"[kr] 배치 {i // CHUNK + 1} 실패: {type(e).__name__}: {e}")
-            continue
-        if raw is None or raw.empty:
-            continue
-
-        for sym in batch:
-            try:
-                sub = raw[sym] if isinstance(raw.columns, pd.MultiIndex) else raw
-            except KeyError:
-                continue
-            tidy = _tidy(sub)
-            if tidy is not None and len(tidy) >= C.MIN_BARS:
-                frames[sym_to_code[sym]] = tidy
-
-        if verbose and (i // CHUNK) % 5 == 0:
-            print(f"  ... {min(i + CHUNK, len(symbols))}/{len(symbols)}종목 "
-                  f"(누적 {len(frames)}종목 확보)", flush=True)
-
-    rate = len(frames) / max(1, len(symbols)) * 100
-    print(f"[kr] 야후 수집 완료: {len(frames):,}/{len(symbols):,}종목 ({rate:.0f}%)")
-    return frames
+    frames = batch_download(list(sym_to_code), start, min_bars=C.MIN_BARS,
+                            verbose=verbose, tag="kr")
+    return {sym_to_code[s]: df for s, df in frames.items()}
 
 
 # ─────────────────────────────────────────────────────────

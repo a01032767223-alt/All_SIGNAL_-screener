@@ -126,7 +126,7 @@ def score_structure(cur) -> tuple[float, str, bool]:
         return _clamp(_interp(over, [0, 3], [92, 100])), \
                f"60봉 최고가 돌파 (+{over:.1f}%)", True
     if close >= prior_high * 0.98:
-        return 82.0, f"저항({prior_high:,.0f}) 돌파 임박 — 박스 상단 {pos*100:.0f}% 지점", True
+        return 82.0, f"저항({fmt_price(prior_high)}) 돌파 임박 — 박스 상단 {pos*100:.0f}% 지점", True
 
     # (b) 주요 지지선 반등
     supports = [("20MA", ma20), ("60MA", ma60), ("직전 저점", _f(cur.get("prior_low")))]
@@ -136,13 +136,13 @@ def score_structure(cur) -> tuple[float, str, bool]:
         near = abs(close / lvl - 1) * 100
         if near <= 3 and ret > 0:
             return _clamp(_interp(near, [0, 3], [80, 68])), \
-                   f"{name}({lvl:,.0f}) 지지 반등 ({ret:+.1f}%)", True
+                   f"{name}({fmt_price(lvl)}) 지지 반등 ({ret:+.1f}%)", True
 
     # (c) 그 외 — 박스 내 위치로 채점
     sc = _interp(pos, [0.0, 0.3, 0.6, 0.85, 1.0], [15, 28, 55, 72, 80])
     if ret <= 0:
         sc *= 0.85
-    return _clamp(sc), f"박스 내 {pos*100:.0f}% 지점 (저항 {prior_high:,.0f})", False
+    return _clamp(sc), f"박스 내 {pos*100:.0f}% 지점 (저항 {fmt_price(prior_high)})", False
 
 
 # ─────────────────────────────────────────────────────────
@@ -552,14 +552,14 @@ def sell_signals(edf) -> list[dict]:
     slope20 = (ma20 / ma20_5ago - 1) * 100 if ma20_5ago else float("nan")
     if not math.isnan(ma20) and not math.isnan(ma60) and ma20 < ma60 \
             and (math.isnan(slope20) or slope20 < 0):
-        add("ma_dead", f"20일선({ma20:,.0f}) < 60일선({ma60:,.0f}) · "
+        add("ma_dead", f"20일선({fmt_price(ma20)}) < 60일선({fmt_price(ma60)}) · "
                        f"20일선 5일 기울기 {slope20:+.2f}%" if not math.isnan(slope20)
-            else f"20일선({ma20:,.0f}) < 60일선({ma60:,.0f})")
+            else f"20일선({fmt_price(ma20)}) < 60일선({fmt_price(ma60)})")
 
     # 2) 지지선 붕괴 — score_structure의 정반대
     close, low_n = _f(cur["close"]), _f(cur.get("low_n"))
     if not math.isnan(low_n) and low_n > 0 and close <= low_n * 1.02:
-        add("structure_break", f"60일 최저가({low_n:,.0f}) 근접·이탈 (현재가 {close:,.0f})")
+        add("structure_break", f"60일 최저가({fmt_price(low_n)}) 근접·이탈 (현재가 {fmt_price(close)})")
 
     # 3) 대량 거래 하락 — score_volume의 정반대
     ret, vr = _f(cur.get("ret_pct"), 0.0), _f(cur.get("vol_ratio"))

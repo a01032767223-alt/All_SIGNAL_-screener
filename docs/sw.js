@@ -1,7 +1,7 @@
 /* 오프라인에서도 마지막 결과를 볼 수 있게 하는 최소 서비스워커.
    - 앱 셸: 캐시 우선
    - 데이터: 네트워크 우선, 실패 시 캐시된 마지막 결과 */
-const CACHE = "screener-v4";
+const CACHE = "screener-v6";   // 미국주식 탭 + 데이터 캐시 키 정규화
 const SHELL = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
@@ -22,14 +22,20 @@ self.addEventListener("fetch", e => {
   const isData = new URL(req.url).pathname.includes("/data/");
 
   if (isData) {
+    // 쿼리스트링(?t=…)을 떼고 항상 같은 키로 저장·조회한다.
+    // 예전에는 요청마다 키가 달라져 (1) 캐시가 무한히 쌓이고
+    // (2) 오프라인에서 가장 오래된 스냅샷이 나왔다.
+    const key = new Request(new URL(req.url).origin + new URL(req.url).pathname);
     e.respondWith(
       fetch(req)
         .then(res => {
-          const copy = res.clone();
-          caches.open(CACHE).then(c => c.put(req, copy));
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then(c => c.put(key, copy));
+          }
           return res;
         })
-        .catch(() => caches.match(req, { ignoreSearch: true }))
+        .catch(() => caches.match(key).then(hit => hit || Response.error()))
     );
   } else {
     e.respondWith(caches.match(req).then(hit => hit || fetch(req)));

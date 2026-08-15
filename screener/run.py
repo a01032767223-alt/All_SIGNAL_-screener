@@ -2,6 +2,7 @@
 
 사용법:
   python -m screener.run --market kr          # 국내주식
+  python -m screener.run --market us          # 미국주식(S&P500+나스닥100)
   python -m screener.run --market coin        # 업비트 코인
   python -m screener.run --market coin --notify
   python -m screener.run --market demo        # 합성 데이터로 파이프라인 점검
@@ -24,7 +25,7 @@ KST = timezone(timedelta(hours=9))
 OUT_DIR = os.path.join("docs", "data")
 HIST_DIR = os.path.join(OUT_DIR, "history")
 
-MARKET_LABEL = {"kr": "국내주식", "coin": "코인(업비트)"}
+MARKET_LABEL = {"kr": "국내주식", "us": "미국주식", "coin": "코인(업비트)"}
 
 
 # ─────────────────────────────────────────────────────────
@@ -87,6 +88,46 @@ def screen_kr() -> dict:
         datetime.now(KST).strftime("%Y-%m-%d")
     print(f"[kr] 평가 {len(frames):,}종목 → 후보 {len(items):,} (오류 {errors})")
     return _payload("kr", items, len(frames), data_date)
+
+
+def screen_us() -> dict:
+    from .sources import us_stock
+
+    frames, meta = us_stock.load()
+
+    items, errors, last_date = [], 0, None
+    for ticker, df in frames.items():
+        try:
+            if len(df) < C.MIN_BARS:
+                continue
+            res = S.evaluate({"1d": df, "1w": S.resample_weekly(df)}, "us")
+            if last_date is None or df.index[-1] > last_date:
+                last_date = df.index[-1]
+            if res is None or res["score"] < C.MIN_OUTPUT_SCORE:
+                continue
+            info = meta.loc[ticker]
+            exch = str(info.get("market", "US"))
+            res.update({
+                "symbol": ticker,
+                # 미국 종목은 티커가 곧 이름 역할을 하므로 둘 다 보여준다
+                "name": str(info.get("name", ticker)),
+                "market": exch,
+                "sector": str(info.get("sector", "") or ""),
+                "turnover": float(info.get("turnover", 0.0) or 0.0),
+                "marketcap": 0.0,
+                "link": us_stock.link_for(ticker, exch),
+            })
+            items.append(res)
+        except Exception:
+            errors += 1
+            if errors <= 3:
+                traceback.print_exc()
+
+    # 미국장 마감 시점의 현지 날짜가 곧 데이터 날짜다 (한국 날짜와 하루 어긋난다)
+    data_date = str(last_date)[:10] if last_date is not None else \
+        datetime.now(KST).strftime("%Y-%m-%d")
+    print(f"[us] 평가 {len(frames):,}종목 → 후보 {len(items):,} (오류 {errors})")
+    return _payload("us", items, len(frames), data_date)
 
 
 def screen_coin() -> dict:
@@ -178,6 +219,7 @@ def _payload(market: str, items: list[dict], scanned: int, data_date: str) -> di
     return {
         "market": market,
         "market_label": MARKET_LABEL.get(market, market),
+        "currency": C.CURRENCY.get(market, "KRW"),
         "generated_at": datetime.now(KST).isoformat(timespec="seconds"),
         "data_date": data_date,
         "scanned": scanned,
@@ -198,13 +240,14 @@ def _payload(market: str, items: list[dict], scanned: int, data_date: str) -> di
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--market", required=True, choices=["kr", "coin", "demo"])
+    ap.add_argument("--market", required=True, choices=["kr", "us", "coin", "demo"])
     ap.add_argument("--notify", action="store_true", help="텔레그램/이메일 발송")
     ap.add_argument("--daily-summary", action="store_true",
                     help="신규 진입뿐 아니라 전체 요약을 강제로 발송")
     args = ap.parse_args()
 
-    fn = {"kr": screen_kr, "coin": screen_coin, "demo": screen_demo}[args.market]
+    fn = {"kr": screen_kr, "us": screen_us,
+          "coin": screen_coin, "demo": screen_demo}[args.market]
     payload = fn()
     market_key = payload["market"]
 
@@ -212,29 +255,39 @@ def main() -> int:
     new_items = _diff_new(prev, payload["items"])
     payload["new_entries"] = [i["symbol"] for i in new_items]
 
+    # 휴장일 방어 — 거래소가 쉬면 어제와 똑같은 마지막 봉이 다시 잡힌다.
+    # 그대로 두면 (1) 어제 히스토리 스냅샷을 같은 내용으로 덮어쓰고
+    # (2) 어제와 글자 하나 다르지 않은 알림을 한 번 더 보낸다.
+    # 코인은 24시간 장이라 하루에도 여러 번 도는 게 정상이므로 제외한다.
+    repeat = (market_key in ("kr", "us") and bool(prev)
+              and prev.get("data_date") == payload["data_date"])
+    if repeat:
+        print(f"[{market_key}] 데이터 날짜가 직전 실행과 동일({payload['data_date']}) "
+              f"→ 휴장일로 보고 히스토리 저장·알림을 건너뜁니다")
+
+    if args.market == "demo":
+        # 데모는 합성 데이터다. 실제 결과 파일을 덮어쓰되 히스토리는 절대 건드리지 않는다
+        # (히스토리는 그 날짜에 한 번뿐이라 덮어쓰면 복구가 안 된다).
+        payload["demo"] = True
+        print("[demo] ⚠ docs/data/kr_latest.json 을 합성 데이터로 덮어씁니다 "
+              "(히스토리·알림은 건너뜀). 실제 결과가 필요하면 --market kr 을 실행하세요.")
+
     _write_json(os.path.join(OUT_DIR, f"{market_key}_latest.json"), payload)
+
     # 히스토리 스냅샷 (나중에 적중률 검증용) — 상위 60종목만 경량 보관
-    slim = {k: v for k, v in payload.items() if k != "items"}
-    slim["items"] = [{k: it[k] for k in ("symbol", "name", "score", "grade", "price",
-                                         "change_pct", "risk")}
-                     for it in payload["items"][:60]]
-    _write_json(os.path.join(HIST_DIR, f"{market_key}_{payload['data_date']}.json"), slim)
+    if args.market != "demo" and not repeat:
+        slim = {k: v for k, v in payload.items() if k != "items"}
+        slim["items"] = [{k: it[k] for k in ("symbol", "name", "score", "grade", "price",
+                                             "change_pct", "risk")}
+                         for it in payload["items"][:60]]
+        _write_json(os.path.join(HIST_DIR, f"{market_key}_{payload['data_date']}.json"), slim)
 
-    # 인덱스(대시보드가 최근 갱신 시각을 알 수 있게)
-    index_path = os.path.join(OUT_DIR, "index.json")
-    idx = {}
-    if os.path.exists(index_path):
-        try:
-            idx = json.load(open(index_path, encoding="utf-8"))
-        except Exception:
-            idx = {}
-    idx[market_key] = {"generated_at": payload["generated_at"],
-                       "data_date": payload["data_date"],
-                       "count": payload["count"],
-                       "grade_counts": payload["grade_counts"]}
-    _write_json(index_path, idx)
+    # 시장별 결과 파일이 서로 겹치지 않도록, 공용 index.json은 만들지 않습니다.
+    # 예전에는 세 워크플로가 같은 index.json을 읽고-고쳐-쓰다가 실행이 겹치면
+    # git rebase 충돌로 한쪽 실행 결과가 통째로 사라졌습니다(그런데도 초록불).
+    # 대시보드는 각 {market}_latest.json 안의 generated_at을 직접 읽습니다.
 
-    if args.notify:
+    if args.notify and args.market != "demo" and not repeat:
         from . import notify
         notify.dispatch(payload, new_items, force_summary=args.daily_summary)
 

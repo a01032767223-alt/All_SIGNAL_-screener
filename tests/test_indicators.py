@@ -195,6 +195,40 @@ def test_risk_levels_sane():
     assert r["rr"] > 0
 
 
+def test_target_capped_for_beaten_down_stock():
+    """고점 대비 크게 빠진 종목이 손익비 10짜리 '좋은 자리'로 둔갑하면 안 된다.
+
+    직전 고점을 1차 목표로 쓰되 손절폭의 MAX_RR_TARGET배를 넘지 않아야 한다.
+    """
+    n = 200
+    close = np.r_[np.linspace(100, 300, 120), np.linspace(300, 120, 80)]
+    close[-1] = close[-2] * 1.01
+    df = pd.DataFrame({"open": np.r_[close[0], close[:-1]], "high": close * 1.01,
+                       "low": close * 0.99, "close": close,
+                       "volume": np.full(n, 1000.0)},
+                      index=pd.bdate_range(end="2026-08-14", periods=n))
+    r = S.risk_levels(I.enrich(df))
+    assert r["rr"] <= C.MAX_RR_TARGET + 0.01, r
+    assert r["stop"] < r["entry"] < r["target"]
+
+
+def test_target_still_uses_prior_high_when_close_enough():
+    """상한을 씌운다고 해서 가까운 직전 고점까지 잘라내면 안 된다."""
+    n = 200
+    base = np.linspace(100, 180, n)
+    close = base.copy()
+    close[-30] = base[-30] * 1.03          # 살짝 위에 있는 직전 고점
+    df = pd.DataFrame({"open": np.r_[close[0], close[:-1]], "high": close * 1.002,
+                       "low": close * 0.998, "close": close,
+                       "volume": np.full(n, 1000.0)},
+                      index=pd.bdate_range(end="2026-08-14", periods=n))
+    edf = I.enrich(df)
+    r = S.risk_levels(edf)
+    ph = float(edf["prior_high"].iloc[-1])
+    if ph > r["entry"] * 1.005 and (ph - r["entry"]) / (r["entry"] - r["stop"]) <= C.MAX_RR_TARGET:
+        assert abs(r["target"] - ph) < 0.01, (r, ph)
+
+
 def test_weekly_resample():
     df = _synth(300, seed=23)
     w = S.resample_weekly(df)

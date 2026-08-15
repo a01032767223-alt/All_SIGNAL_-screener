@@ -2,6 +2,15 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
+<!-- GitHub Pages는 응답 헤더를 넣을 수 없어 meta로 겁니다.
+     외부 스크립트 로드와 다른 출처로의 통신·이미지 요청을 전부 막아,
+     혹시 이스케이프가 뚫리더라도 데이터가 밖으로 나가지 못하게 합니다.
+     worker-src를 따로 적지 않으면 script-src로 폴백해 서비스워커가 막힙니다. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'unsafe-inline'; worker-src 'self';
+               style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:;
+               manifest-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#141413">
 <title>매수신호 스크리너</title>
@@ -40,7 +49,9 @@ h1{font-size:17px;margin:0;letter-spacing:-.2px}
 .tabs{max-width:760px;margin:0 auto;padding:10px 14px 0;display:flex;gap:6px}
 .tab{flex:1;padding:9px 0;border:1px solid var(--line);border-bottom:none;
   border-radius:10px 10px 0 0;background:transparent;color:var(--text-2);
-  font:600 14px/1 inherit;cursor:pointer}
+  font:600 13.5px/1 inherit;cursor:pointer;white-space:nowrap}
+/* 탭이 4개라 좁은 화면(아이폰 SE 등)에서는 글자를 한 단계 줄인다 */
+@media (max-width:360px){.tabs{gap:4px;padding:10px 8px 0}.tab{font-size:12px}}
 .tab[aria-selected="true"]{background:var(--surface-1);color:var(--text-1);
   border-color:var(--seq-500)}
 
@@ -86,6 +97,9 @@ input[type=search]{flex:1;min-width:110px}
 .px span{font-size:12px}
 .up{color:var(--up)} .down{color:var(--down)} .flat{color:var(--text-3)}
 .head{font-size:12px;color:var(--seq-200);margin:9px 0 0}
+.warnrow{display:flex;align-items:center;gap:5px;margin-top:8px;font-size:11.5px;
+  color:var(--warn)}
+.warnrow .dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--warn)}
 .meter{height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden;margin:8px 0}
 .meter i{display:block;height:100%;background:var(--seq-400);border-radius:0 3px 3px 0}
 .mini{display:grid;grid-template-columns:repeat(8,1fr);gap:4px;align-items:end}
@@ -183,6 +197,14 @@ table.list th{color:var(--text-3);font-weight:600;font-size:11px}
   border-radius:11px;padding:12px 13px;margin-bottom:10px}
 .warn-box h2{color:var(--warn);font-size:14px;margin:0 0 8px}
 .warn-box li{color:var(--text-2)}
+.warn-box .lead{font-size:12px;color:var(--text-3);margin:0 0 10px}
+.wi{display:flex;gap:8px;padding:9px 0;border-bottom:1px solid rgba(250,178,25,.25)}
+.wi:last-child{border-bottom:none}
+.wi .ic{flex:none;font-size:14px;line-height:1.4}
+.wi .t{flex:1;min-width:0}
+.wi .t b{font-size:13px;color:var(--text-1)}
+.wi .t p{margin:3px 0 0;font-size:12px;color:var(--text-2);line-height:1.55}
+.wi .t .h{margin:5px 0 0;font-size:11.5px;color:var(--text-3);line-height:1.55}
 .note{font-size:11px;color:var(--text-3);line-height:1.6;margin-top:18px;
   padding-top:12px;border-top:1px solid var(--line)}
 .empty{text-align:center;color:var(--text-3);padding:44px 16px;font-size:14px}
@@ -194,6 +216,7 @@ a{color:var(--seq-300)}
   <div class="hrow"><h1>매수신호 스크리너</h1><span class="stamp" id="stamp">불러오는 중…</span></div>
   <div class="tabs" role="tablist">
     <button class="tab" role="tab" id="tab-kr" aria-selected="true">국내주식</button>
+    <button class="tab" role="tab" id="tab-us" aria-selected="false">미국주식</button>
     <button class="tab" role="tab" id="tab-coin" aria-selected="false">코인</button>
     <button class="tab" role="tab" id="tab-guide" aria-selected="false">가이드</button>
   </div>
@@ -243,21 +266,49 @@ const SHORT={ma:"MA",volume:"거래량",structure:"구조",rsi:"RSI",macd:"MACD"
              bb:"BB",adx:"ADX",obv:"OBV"};
 const ORDER=["ma","volume","structure","rsi","macd","bb","adx","obv"];
 const state={market:"kr",cut:65,grades:new Set(GRADES),q:"",sort:"score",
-             view:"card",screen:"list",data:{},last:null};
+             view:"card",screen:"list",data:{},fetched:{},last:null,
+             loading:false,stale:false};
 
-const fmtP=v=>v>=1000?v.toLocaleString(undefined,{maximumFractionDigits:0})
-          :v>=1?v.toFixed(2):v.toFixed(4);
-const fmtM=v=>!v?"-":v>=1e12?(v/1e12).toFixed(1)+"조":v>=1e8?Math.round(v/1e8)+"억"
-          :v>=1e4?Math.round(v/1e4)+"만":Math.round(v);
+/* 현재 보고 있는 시장의 통화 — 미국주식만 달러 표기가 된다 */
+const curOf=()=>((state.data[state.market]||{}).currency)||"KRW";
+const fmtP=v=>{
+  if(curOf()==="USD")
+    return "$"+(v>=1?v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})
+                    :v.toFixed(4));
+  return v>=1000?v.toLocaleString(undefined,{maximumFractionDigits:0})
+        :v>=1?v.toFixed(2):v.toFixed(4);
+};
+const fmtM=v=>{
+  if(!v) return "-";
+  if(curOf()==="USD")
+    return v>=1e9?"$"+(v/1e9).toFixed(1)+"B":v>=1e6?"$"+Math.round(v/1e6)+"M"
+          :"$"+Math.round(v).toLocaleString();
+  return v>=1e12?(v/1e12).toFixed(1)+"조":v>=1e8?Math.round(v/1e8)+"억"
+        :v>=1e4?Math.round(v/1e4)+"만":Math.round(v);
+};
 const cls=v=>v>0?"up":v<0?"down":"flat";
 const arrow=v=>v>0?"▲":v<0?"▼":"–";
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
+const FRESH_MS=3*60*1000;          // 이 시간이 지나면 다시 받아온다
 async function load(market){
-  if(state.data[market]) return state.data[market];
-  const r=await fetch(`data/${market}_latest.json?t=${Date.now()}`,{cache:"no-store"});
-  if(!r.ok) throw new Error(`data/${market}_latest.json 없음 (${r.status})`);
-  const j=await r.json(); state.data[market]=j; state.last=j; return j;
+  const hit=state.data[market];
+  if(hit && Date.now()-(state.fetched[market]||0) < FRESH_MS){ state.last=hit; return hit; }
+  let r;
+  try{
+    r=await fetch(`data/${market}_latest.json`,{cache:"no-store"});
+  }catch(e){
+    // 오프라인이거나 서버에 닿지 못한 경우. 예전에 받아둔 게 있으면 그걸 보여준다.
+    if(hit){ state.last=hit; state.stale=true; return hit; }
+    const err=new Error("network"); err.kind="network"; throw err;
+  }
+  if(!r.ok){
+    if(hit){ state.last=hit; state.stale=true; return hit; }
+    const err=new Error(`HTTP ${r.status}`); err.kind=r.status===404?"missing":"http"; throw err;
+  }
+  const j=await r.json();
+  state.data[market]=j; state.fetched[market]=Date.now(); state.last=j; state.stale=false;
+  return j;
 }
 
 function filtered(d){
@@ -299,6 +350,8 @@ function cardHTML(x){
         <span class="${cls(x.change_pct)}">${arrow(x.change_pct)} ${Math.abs(x.change_pct).toFixed(2)}%</span></span>
     </div>
     ${x.headline?`<p class="head">${esc(x.headline)}</p>`:""}
+    ${x.warning_count?`<div class="warnrow"><span class="dot"></span>
+       매도·경계 신호 ${x.warning_count}건 — ${esc(x.warnings.map(w=>w.label).join(" · "))}</div>`:""}
     <div class="meter"><i style="width:${x.score}%"></i></div>
     <div class="mini">${mini}</div>
     <div class="c-foot">
@@ -309,14 +362,20 @@ function cardHTML(x){
 
 function tableHTML(items){
   return `<table class="list"><thead><tr><th>종목</th><th>등급</th><th>점수</th><th>현재가</th>
-    <th>등락</th><th>조건</th><th>손익비</th></tr></thead><tbody>`+
-    items.map(x=>`<tr><td>${esc(x.name)}</td><td>${x.grade}</td><td>${x.score.toFixed(1)}</td>
+    <th>등락</th><th>조건</th><th>손익비</th><th>경고</th></tr></thead><tbody>`+
+    items.map(x=>`<tr><td>${esc(x.name)}${curOf()==="USD"
+      ?` <span style="color:var(--text-3)">${esc(x.symbol)}</span>`:""}</td>
+    <td>${x.grade}</td><td>${x.score.toFixed(1)}</td>
     <td>${fmtP(x.price)}</td><td class="${cls(x.change_pct)}">${x.change_pct.toFixed(2)}%</td>
-    <td>${x.checks_passed}/8</td><td>${x.risk.rr.toFixed(1)}</td></tr>`).join("")+
+    <td>${x.checks_passed}/8</td><td>${x.risk.rr.toFixed(1)}</td>
+    <td style="color:var(--warn)">${x.warning_count?"⚠ "+x.warning_count:"-"}</td></tr>`).join("")+
     `</tbody></table>`;
 }
 
 function render(){
+  // 탭을 누른 직후에는 아직 이전 시장 데이터가 들어있다. 그대로 그리면
+  // 방금 비운 목록에 이전 시장 카드가 다시 나타난다.
+  if(state.loading) return;
   const d=state.data[state.market]; if(!d) return;
   tiles(d);
   const items=filtered(d);
@@ -331,13 +390,16 @@ function render(){
     list.innerHTML=items.length?items.map(cardHTML).join("")+cap
       :`<p class="empty">조건에 맞는 종목이 없습니다.<br>최소 점수를 낮춰보세요.</p>`;
   }
+  const demo=d.demo?" · 샘플데이터":"";
+  const stale=state.stale?" · 오프라인(저장본)":"";
   document.getElementById("stamp").textContent=
-    `${d.data_date} · ${d.count}건 · ${(d.generated_at||"").slice(11,16)} 갱신`;
+    `${d.data_date} · ${d.count}건 · ${(d.generated_at||"").slice(11,16)} 갱신${demo}${stale}`;
 }
 
 /* ── 상세 ─────────────────────────────── */
 function openDetail(sym){
   const d=state.data[state.market];
+  if(!d||!Array.isArray(d.items)) return;   // 탭 전환 중이면 조용히 무시
   const x=d.items.find(i=>i.symbol===sym); if(!x) return;
   const r=x.risk, gi=(d.grade_info||{})[x.grade]||{};
   const help=d.indicator_help||{}, cond=d.conditions||{};
@@ -363,6 +425,16 @@ function openDetail(sym){
       </div></div>`;
   }).join("");
 
+  const warnBox=(x.warnings&&x.warnings.length)?`
+    <div class="warn-box" style="margin-top:14px">
+      <h2>⚠ 매도·경계 신호 ${x.warnings.length}건</h2>
+      <p class="lead">매수 점수와는 별개로 계산했습니다. 총점·등급에는 반영되지 않았으니
+        아래 내용을 직접 보고 판단하세요.</p>
+      ${x.warnings.map(w=>`<div class="wi"><span class="ic">⚠</span>
+        <span class="t"><b>${esc(w.label)}</b><p>${esc(w.detail)}</p>
+        <p class="h">${esc(w.help)}</p></span></div>`).join("")}
+    </div>`:"";
+
   document.getElementById("dlgc").innerHTML=`
     <div class="dh">
       <span class="badge b-${x.grade}">${x.grade}</span>
@@ -378,6 +450,7 @@ function openDetail(sym){
         ${gi.caution?`<span class="cau">⚠ ${esc(gi.caution)}</span>`:""}
       </div>
       ${x.headline?`<p class="head" style="margin:10px 0 0">${esc(x.headline)}</p>`:""}
+      ${warnBox}
 
       <div class="sec">가격과 거래대금</div>
       <div class="kv">
@@ -451,6 +524,17 @@ function guideHTML(){
       <li><b>손익비 확인</b> — 2.0 미만이면 목표보다 위험이 큰 자리입니다. 넘기세요.</li>
       <li><b>사기 전에 손절가를 먼저 적어두기</b> — 산 뒤에 정하면 못 지킵니다.</li>
     </ol>
+  </div>
+
+  <div class="warn-box">
+    <h2>⚠ 매도·경계 신호가 뜨는 이유</h2>
+    <p class="lead" style="margin-bottom:0">등급과 총점은 “매수 조건에 얼마나 부합하는가”만
+      봅니다. 이동평균·거래량·가격구조 비중이 커서, 이 세 가지가 강하면 RSI·MACD 같은
+      다른 지표가 꺾이는 신호를 보내도 총점 자체는 통과선을 넘을 수 있습니다 — 상승 추세는
+      아직 살아있지만 단기 과열로 꺾이기 시작한 ‘천장 근처’ 종목이 그렇습니다. 그래서 점수를
+      깎는 대신, 8개 지표를 매수 관점의 정반대로 다시 훑어서 걸리는 게 있으면 카드와 상세
+      화면에 <span style="color:var(--warn)">⚠ 노란 경고</span>로 따로 보여줍니다.
+      경고가 있다고 등급이 바뀌지는 않으니 직접 확인하고 판단하세요.</p>
   </div>
 
   <div class="warn-box">
@@ -535,25 +619,46 @@ document.getElementById("dlg").addEventListener("click",e=>{
   if(e.target.id==="dlg") e.target.close();});
 
 function mark(id){
-  ["tab-kr","tab-coin","tab-guide"].forEach(t=>
+  ["tab-kr","tab-us","tab-coin","tab-guide"].forEach(t=>
     document.getElementById(t).setAttribute("aria-selected",t===id));
 }
 
+const EMPTY_MSG={
+  missing:`아직 이 시장의 결과 파일이 없습니다.<br><br>
+    GitHub Actions에서 해당 스크리닝을 한 번 실행하면 표시됩니다.<br>
+    그 전에도 <b>가이드</b> 탭은 볼 수 있습니다.`,
+  network:`지금 인터넷에 연결되어 있지 않고, 이 기기에 저장해 둔 결과도 없습니다.<br><br>
+    연결된 뒤 새로고침하면 마지막 결과를 받아옵니다.`,
+  http:`결과 파일을 불러오지 못했습니다. 잠시 뒤 새로고침해 주세요.`,
+};
+
 async function go(market){
-  mark("tab-"+market); setScreen("list"); state.market=market;
-  try{ await load(market); render(); }
+  mark("tab-"+market); setScreen("list");
+  state.loading=true;
+  // 로딩이 끝나기 전에는 이전 시장의 카드가 남아 오해를 부르므로 비워둔다
+  // (예전에는 여기서 이전 시장 카드를 눌러 상세가 터졌다).
+  document.getElementById("list").innerHTML=`<p class="empty">불러오는 중…</p>`;
+  document.getElementById("list").hidden=false;
+  document.getElementById("table").hidden=true;
+  document.getElementById("tiles").innerHTML="";
+  try{
+    await load(market);
+    state.market=market; state.loading=false;
+    render();
+  }
   catch(err){
+    state.market=market; state.loading=false;
     document.getElementById("list").innerHTML=
-      `<p class="empty">아직 결과 파일이 없습니다.<br><small>${esc(err.message)}</small><br><br>
-       GitHub Actions에서 스크리닝을 한 번 실행하면 표시됩니다.<br>
-       그 전에도 <b>가이드</b> 탭은 볼 수 있습니다.</p>`;
+      `<p class="empty">${EMPTY_MSG[err.kind]||EMPTY_MSG.http}</p>`;
     document.getElementById("table").hidden=true;
     document.getElementById("list").hidden=false;
     document.getElementById("tiles").innerHTML="";
-    document.getElementById("stamp").textContent="데이터 없음";
+    document.getElementById("stamp").textContent=
+      err.kind==="network"?"오프라인":"데이터 없음";
   }
 }
 document.getElementById("tab-kr").onclick=()=>go("kr");
+document.getElementById("tab-us").onclick=()=>go("us");
 document.getElementById("tab-coin").onclick=()=>go("coin");
 document.getElementById("tab-guide").onclick=()=>{mark("tab-guide"); setScreen("guide");};
 

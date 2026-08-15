@@ -143,7 +143,10 @@ def screen_demo() -> dict:
         vol = rng.lognormal(11, 0.4, n)
         if i % 3 == 0:
             vol[-3:] *= rng.uniform(1.8, 3.2)
-        idx = pd.bdate_range(end=datetime.now(), periods=n)
+        # 주말에 실행하면 bdate_range(end=토/일, periods=n)이 n-1개만 반환하는
+        # pandas 특성이 있어(끝점이 영업일이 아니면 카운트가 어긋남), 여유 있게
+        # 만든 뒤 뒤에서 n개만 잘라 항상 길이를 맞춘다.
+        idx = pd.bdate_range(end=datetime.now(), periods=n + 5)[-n:]
         df = pd.DataFrame({"open": open_, "high": high, "low": low,
                            "close": close, "volume": vol}, index=idx)
         res = S.evaluate({"1d": df, "1w": S.resample_weekly(df)}, "kr")

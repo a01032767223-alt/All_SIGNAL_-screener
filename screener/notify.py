@@ -49,11 +49,15 @@ def _line(it: dict) -> str:
     r = it["risk"]
     head = it.get("headline", "")
     rr_warn = "" if r.get("rr_ok", True) else " ⚠손익비낮음"
+    warns = it.get("warnings") or []
+    warn_line = ("   ⚠ 매도·경계 신호: " + ", ".join(w["label"] for w in warns) + "\n") \
+        if warns else ""
     return (f"{g} <b>{html.escape(it['name'])}</b> "
             f"<code>{it['score']:.0f}점</code> {it['grade']}등급\n"
             f"   {_fmt_price(it['price'])} ({it['change_pct']:+.1f}%) · "
             f"거래대금 {_fmt_money(it.get('turnover', 0))} · 조건 {it['checks_passed']}/8\n"
             + (f"   ▸ {html.escape(head)}\n" if head else "")
+            + warn_line
             + f"   손절 {r['stop_pct']:+.1f}% / 목표 {r['target_pct']:+.1f}% "
               f"(손익비 {r['rr']:.1f}){rr_warn}")
 
@@ -123,10 +127,14 @@ def _email_html(payload: dict, items: list[dict], title: str) -> str:
     rows = []
     for i, it in enumerate(items[:20], 1):
         r = it["risk"]
+        warns = it.get("warnings") or []
+        warn_html = (f"<br><span style='color:#c07800;font-size:11.5px'>"
+                    f"⚠ {html.escape(', '.join(w['label'] for w in warns))}</span>") if warns else ""
         rows.append(
             f"<tr><td>{i}</td><td><b>{html.escape(it['name'])}</b><br>"
             f"<span style='color:#888;font-size:12px'>{it['symbol']}"
-            f"{' · ' + html.escape(it['headline']) if it.get('headline') else ''}</span></td>"
+            f"{' · ' + html.escape(it['headline']) if it.get('headline') else ''}</span>"
+            f"{warn_html}</td>"
             f"<td align='center'><b>{it['score']:.0f}</b><br>"
             f"<span style='font-size:12px'>{it['grade']}</span></td>"
             f"<td align='right'>{_fmt_price(it['price'])}<br>"
@@ -153,7 +161,8 @@ def _email_html(payload: dict, items: list[dict], title: str) -> str:
 </table>
 <p style="color:#999;font-size:12px">점수는 '오를 확률'이 아니라 지금 차트가 교과서적인 매수
 조건에 얼마나 부합하는지입니다. 지표는 모두 과거 가격의 함수라 후행하며, 공시·실적·뉴스는
-반영되지 않습니다. 투자 판단 참고용이며 매매 권유가 아닙니다.</p></div>"""
+반영되지 않습니다. ⚠ 표시는 매수 점수와 별개로 계산한 매도·경계 신호로, 총점·등급에는
+반영되지 않으니 대시보드에서 직접 확인하세요. 투자 판단 참고용이며 매매 권유가 아닙니다.</p></div>"""
 
 
 # ── 디스패치 ────────────────────────────────────────────────

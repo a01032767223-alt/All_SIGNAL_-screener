@@ -95,11 +95,15 @@ def evaluate(frames: dict[str, pd.DataFrame], asset_class: str) -> dict | None:
     parts = tf_results["1d"]["parts"]
     # 카드의 미니 막대에 필요한 최소 정보만 (상세 화면은 parts를 씁니다)
     checks = [{"key": k, "ok": p["ok"], "score": p["score"]} for k, p in parts.items()]
+    # 매수 점수와는 별개로 계산 — 총점·등급·통과 여부에 영향을 주지 않는 '경고'입니다.
+    warnings = R.sell_signals(daily_edf)
 
     return {
         "score": round(combined, 2),
         "grade": grade_of(combined),
         "headline": R.headline(parts),
+        "warnings": warnings,
+        "warning_count": len(warnings),
         "mtf_aligned": bool(aligned and len(tf_results) > 1),
         "timeframes": {tf: {"label": v["label"], "score": v["total"]} for tf, v in tf_results.items()},
         "parts": parts,

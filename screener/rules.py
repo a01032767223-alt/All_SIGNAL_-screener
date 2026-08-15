@@ -495,3 +495,101 @@ def score_all(edf) -> dict:
         # 조건문·초보자 해설은 종목마다 같은 내용이므로 JSON 최상단에 한 번만 담습니다
         # (200종목 × 8지표만큼 반복하면 모바일에서 로딩이 느려집니다)
     return {"total": round(_clamp(total), 2), "parts": parts}
+
+
+# ═══════════════════════════════════════════════════════════
+# 매도·경계 신호 감지
+# ═══════════════════════════════════════════════════════════
+# 총점은 '매수 조건에 얼마나 부합하는가'의 가중합입니다. 비중이 큰 이동평균·거래량·
+# 가격구조가 강하면, RSI·MACD·OBV가 전부 반대 신호를 보내도 총점 자체는 통과선을
+# 넘을 수 있습니다 — 예를 들어 추세는 아직 살아있지만 RSI가 과열 후 꺾이기 시작한
+# '천장 근처' 종목이 그렇습니다. 그래서 점수를 깎거나 종목을 빼는 대신, 8개 지표를
+# 매수 관점의 정반대로 다시 훑어서 걸리는 게 있으면 경고로 별도 노출합니다.
+# (매수 후보에서 자동으로 제외하지 않는 이유: 상승 초입에도 RSI 단기 과열 같은
+#  경보가 섞여 나올 수 있어, 종목째로 빼면 좋은 진입 기회까지 함께 날아갑니다.
+#  선택은 최종적으로 사람이 하는 게 맞다고 판단했습니다.)
+SELL_SIGNAL_LABEL = {
+    "ma_dead": "이동평균 역배열 전환",
+    "structure_break": "지지선 이탈",
+    "volume_dump": "대량 거래 하락",
+    "rsi_topping": "RSI 과열 후 하락 전환",
+    "macd_dead_cross": "MACD 데드크로스",
+    "adx_bear": "하락 추세에 힘 실림",
+    "obv_dump": "OBV 하락 (자금 이탈 의심)",
+}
+SELL_SIGNAL_HELP = {
+    "ma_dead": "단기(20일) 평균선이 중기(60일) 평균선 아래로 내려갔고, 그 20일선마저 "
+               "계속 처지는 중입니다. 매수 조건(20MA>60MA)의 정반대 상태입니다.",
+    "structure_break": "최근 60일 중 가장 낮았던 가격 근처까지 다시 밀렸습니다. "
+                       "그동안 받쳐주던 매수세가 힘을 잃었을 수 있습니다.",
+    "volume_dump": "거래량이 평소보다 크게 늘면서 가격이 떨어졌습니다. "
+                   "누군가 물량을 대량으로 정리하고 있다는 신호로 봅니다.",
+    "rsi_topping": "RSI가 70을 넘어 과열 구간에 있다가 다시 꺾이기 시작했습니다. "
+                   "단기 급등 뒤 숨 고르기(조정)가 나올 수 있는 자리입니다.",
+    "macd_dead_cross": "빠른 평균선이 느린 평균선을 위에서 아래로 뚫었습니다. "
+                       "골든크로스의 정반대로, 중기 하락 전환 신호입니다.",
+    "adx_bear": "추세에 힘이 실리고 있는데 그 방향이 하락입니다 (−DI가 +DI보다 큼).",
+    "obv_dump": "가격이 오른 날보다 내린 날의 거래량이 더 커서 누적값이 줄고 있습니다. "
+               "조용히 물량을 던지고 있다는 뜻일 수 있습니다.",
+}
+
+
+def sell_signals(edf) -> list[dict]:
+    """일봉 기준 매도·경계 신호 목록. 점수·등급·통과 여부에는 영향을 주지 않는다."""
+    if len(edf) < 6:
+        return []
+    cur, prev = edf.iloc[-1], edf.iloc[-2]
+    recent = edf.tail(6)
+    out: list[dict] = []
+
+    def add(key: str, detail: str) -> None:
+        out.append({"key": key, "label": SELL_SIGNAL_LABEL[key],
+                    "detail": detail, "help": SELL_SIGNAL_HELP[key]})
+
+    # 1) 이동평균 역배열 전환 — score_ma의 정반대
+    ma20, ma60 = _f(cur.get("ma20")), _f(cur.get("ma60"))
+    ma20_5ago = _f(edf.iloc[-6].get("ma20"))
+    slope20 = (ma20 / ma20_5ago - 1) * 100 if ma20_5ago else float("nan")
+    if not math.isnan(ma20) and not math.isnan(ma60) and ma20 < ma60 \
+            and (math.isnan(slope20) or slope20 < 0):
+        add("ma_dead", f"20일선({ma20:,.0f}) < 60일선({ma60:,.0f}) · "
+                       f"20일선 5일 기울기 {slope20:+.2f}%" if not math.isnan(slope20)
+            else f"20일선({ma20:,.0f}) < 60일선({ma60:,.0f})")
+
+    # 2) 지지선 붕괴 — score_structure의 정반대
+    close, low_n = _f(cur["close"]), _f(cur.get("low_n"))
+    if not math.isnan(low_n) and low_n > 0 and close <= low_n * 1.02:
+        add("structure_break", f"60일 최저가({low_n:,.0f}) 근접·이탈 (현재가 {close:,.0f})")
+
+    # 3) 대량 거래 하락 — score_volume의 정반대
+    ret, vr = _f(cur.get("ret_pct"), 0.0), _f(cur.get("vol_ratio"))
+    if ret <= -1.5 and not math.isnan(vr) and vr >= 1.5:
+        add("volume_dump", f"{ret:+.1f}% 하락 + 거래량 20일 평균의 {vr:.1f}배")
+
+    # 4) RSI 과열 후 하락 전환 — score_rsi의 정반대
+    r, rp = _f(cur.get("rsi")), _f(prev.get("rsi"))
+    if r > 70 and not math.isnan(rp) and r < rp:
+        add("rsi_topping", f"RSI {rp:.1f} → {r:.1f}")
+
+    # 5) MACD 데드크로스 — score_macd의 골든크로스 판정과 대칭
+    dc = False
+    if len(recent) >= 2:
+        diff = (recent["macd"] - recent["macd_signal"]).tail(4).tolist()
+        for i in range(1, len(diff)):
+            if diff[i - 1] >= 0 > diff[i]:
+                dc = True
+    if dc:
+        add("macd_dead_cross", "MACD가 시그널선을 아래로 하향 돌파 (3봉 이내)")
+
+    # 6) 하락 추세에 힘 실림 — score_adx의 정반대
+    a, pdi, mdi = _f(cur.get("adx")), _f(cur.get("plus_di")), _f(cur.get("minus_di"))
+    if not math.isnan(a) and a >= 20 and not math.isnan(mdi) and not math.isnan(pdi) \
+            and mdi > pdi:
+        add("adx_bear", f"ADX {a:.0f} · −DI({mdi:.0f}) > +DI({pdi:.0f})")
+
+    # 7) OBV 하락 — score_obv의 정반대
+    osl = _f(cur.get("obv_slope"))
+    if not math.isnan(osl) and osl < -5:
+        add("obv_dump", f"OBV 20봉 변화 {osl:+.1f}%")
+
+    return out

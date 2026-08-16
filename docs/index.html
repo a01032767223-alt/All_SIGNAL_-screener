@@ -89,6 +89,7 @@ input[type=search]{flex:1;min-width:110px}
   font:800 14px/1 inherit;color:#08131f}
 .b-S{background:var(--seq-200)} .b-A{background:var(--seq-300)}
 .b-B{background:var(--seq-400);color:#fff} .b-C{background:var(--seq-500);color:#fff}
+.b-x{background:var(--surface-3);color:var(--text-2)}
 /* 카드(버튼) 안에 앵커를 중첩하면 접근성·클릭버블링 문제가 생기므로, 차트
    바로가기는 카드 바로 아래 얇은 줄로 형제 요소에 붙인다. */
 .card-wrap{margin-bottom:9px}
@@ -96,6 +97,8 @@ input[type=search]{flex:1;min-width:110px}
 .chart-ico{display:block;text-align:right;padding:5px 4px 0;font-size:11.5px;
   color:var(--text-3);text-decoration:none}
 .chart-ico:hover{color:var(--seq-300)}
+.card.outside{border-style:dashed}
+#searchExtra:not(:empty){margin-top:6px}
 .nm{flex:1;min-width:0}
 .nm b{display:block;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nm span{font-size:11px;color:var(--text-3)}
@@ -258,6 +261,7 @@ a{color:var(--seq-300)}
 
     <div id="list"></div>
     <div id="table" hidden></div>
+    <div id="searchExtra"></div>
   </div>
 
   <div id="screen-guide" hidden></div>
@@ -372,6 +376,30 @@ function cardHTML(x){
       rel="noopener noreferrer">📈 차트 보기 ↗</a>`:""}</div>`;
 }
 
+/* 조건 밖 종목 검색 — 카드 목록엔 안 뜨지만 이름·티커로는 찾을 수 있는 종목.
+   기본 정보만 담겨 있어(지표 상세 없음) 카드도 modal도 간소화된 버전을 쓴다. */
+function searchOutside(d){
+  const q=state.q.trim().toLowerCase();
+  if(!q||!Array.isArray(d.search_index)) return [];
+  const shown=new Set(filtered(d).map(x=>x.symbol));
+  return d.search_index.filter(x=>!shown.has(x.symbol)&&
+    (x.name.toLowerCase().includes(q)||x.symbol.toLowerCase().includes(q))).slice(0,20);
+}
+
+function searchCardHTML(x){
+  const gcls=GRADES.includes(x.grade)?"b-"+x.grade:"b-x";
+  return `<div class="card-wrap"><button class="card outside" data-searchsym="${esc(x.symbol)}">
+    <div class="c-top">
+      <span class="badge ${gcls}">${esc(x.grade)}</span>
+      <span class="nm"><b>${esc(x.name)}</b><span>${esc(x.symbol)} · ${esc(x.market||"")}</span></span>
+      <span class="px"><b>${fmtP(x.price)}</b>
+        <span class="${cls(x.change_pct)}">${arrow(x.change_pct)} ${Math.abs(x.change_pct).toFixed(2)}%</span></span>
+    </div>
+    <p class="head" style="color:var(--text-3)">총점 ${x.score.toFixed(1)}점 · 현재 목록 노출 조건 밖</p>
+  </button>${x.link?`<a class="chart-ico" href="${esc(x.link)}" target="_blank"
+    rel="noopener noreferrer">📈 차트 보기 ↗</a>`:""}</div>`;
+}
+
 function tableHTML(items){
   return `<table class="list"><thead><tr><th>종목</th><th>등급</th><th>점수</th><th>현재가</th>
     <th>등락</th><th>조건</th><th>손익비</th><th>경고</th><th>차트</th></tr></thead><tbody>`+
@@ -404,6 +432,10 @@ function render(){
     list.innerHTML=items.length?items.map(cardHTML).join("")+cap
       :`<p class="empty">조건에 맞는 종목이 없습니다.<br>최소 점수를 낮춰보세요.</p>`;
   }
+  const extra=searchOutside(d);
+  document.getElementById("searchExtra").innerHTML=extra.length?
+    `<div class="sec">조건 밖 검색 결과 (${extra.length}건)</div>${extra.map(searchCardHTML).join("")}`
+    :"";
   const demo=d.demo?" · 샘플데이터":"";
   const stale=state.stale?" · 오프라인(저장본)":"";
   document.getElementById("stamp").textContent=
@@ -495,6 +527,35 @@ function openDetail(sym){
 
       <div class="sec">지표 8개 — 실제 수치와 점수</div>
       ${inds}
+    </div>`;
+  const dlg=document.getElementById("dlg");
+  dlg.showModal();
+  document.getElementById("cl").onclick=()=>dlg.close();
+}
+
+function openSearchDetail(sym){
+  const d=state.data[state.market];
+  if(!d||!Array.isArray(d.search_index)) return;
+  const x=d.search_index.find(i=>i.symbol===sym); if(!x) return;
+  const gcls=GRADES.includes(x.grade)?"b-"+x.grade:"b-x";
+  document.getElementById("dlgc").innerHTML=`
+    <div class="dh">
+      <span class="badge ${gcls}">${esc(x.grade)}</span>
+      <span class="nm"><b style="font-size:16px">${esc(x.name)}</b>
+        <span>${esc(x.symbol)} · ${esc(x.market||"")}</span></span>
+      ${x.link?`<a class="chartlink" href="${esc(x.link)}" target="_blank"
+        rel="noopener noreferrer">📈 차트 보기</a>`:""}
+      <button class="close" id="cl" aria-label="닫기">✕</button>
+    </div>
+    <div class="db">
+      <div class="kv">
+        <div><span>현재가</span><b>${fmtP(x.price)}
+          <small class="${cls(x.change_pct)}">${arrow(x.change_pct)} ${Math.abs(x.change_pct).toFixed(2)}%</small></b></div>
+        <div><span>총점</span><b>${x.score.toFixed(1)}</b></div>
+      </div>
+      <p class="dt" style="margin-top:14px">이 종목은 현재 화면의 필터 조건(최소 점수·등급)을
+        만족하지 못해 목록에는 표시되지 않습니다. 지표별 상세 분석(8개 지표 breakdown)은
+        조건을 만족하는 종목에서만 제공됩니다.</p>
     </div>`;
   const dlg=document.getElementById("dlg");
   dlg.showModal();
@@ -632,6 +693,8 @@ document.getElementById("viewtoggle").addEventListener("click",e=>{
   e.target.textContent=state.view==="card"?"표로 보기":"카드로 보기"; render();});
 document.getElementById("list").addEventListener("click",e=>{
   const c=e.target.closest(".card"); if(c) openDetail(c.dataset.sym);});
+document.getElementById("searchExtra").addEventListener("click",e=>{
+  const c=e.target.closest("[data-searchsym]"); if(c) openSearchDetail(c.dataset.searchsym);});
 document.getElementById("dlg").addEventListener("click",e=>{
   if(e.target.id==="dlg") e.target.close();});
 
@@ -658,6 +721,7 @@ async function go(market){
   document.getElementById("list").hidden=false;
   document.getElementById("table").hidden=true;
   document.getElementById("tiles").innerHTML="";
+  document.getElementById("searchExtra").innerHTML="";
   try{
     await load(market);
     state.market=market; state.loading=false;
@@ -670,6 +734,7 @@ async function go(market){
     document.getElementById("table").hidden=true;
     document.getElementById("list").hidden=false;
     document.getElementById("tiles").innerHTML="";
+    document.getElementById("searchExtra").innerHTML="";
     document.getElementById("stamp").textContent=
       err.kind==="network"?"오프라인":"데이터 없음";
   }

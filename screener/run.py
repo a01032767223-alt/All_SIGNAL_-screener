@@ -60,6 +60,7 @@ def screen_kr() -> dict:
     frames, meta = kr_stock.load()
 
     items, errors, last_date = [], 0, None
+    search_index = []
     for ticker, df in frames.items():
         try:
             if len(df) < C.MIN_BARS:
@@ -67,16 +68,26 @@ def screen_kr() -> dict:
             res = S.evaluate({"1d": df, "1w": S.resample_weekly(df)}, "kr")
             if last_date is None or df.index[-1] > last_date:
                 last_date = df.index[-1]
-            if res is None or res["score"] < C.MIN_OUTPUT_SCORE:
+            if res is None:
                 continue
             info = meta.loc[ticker]
+            name = str(info.get("name", ticker))
+            market_name = str(info.get("market", ""))
+            link = f"https://m.stock.naver.com/domestic/stock/{ticker}/total"
+            # 조건 미달 종목도 이름·티커로 찾을 수 있게 기본 정보만 따로 남긴다
+            # (지표 상세는 조건을 만족하는 종목에만 붙는다).
+            search_index.append({"symbol": ticker, "name": name, "market": market_name,
+                                 "price": res["price"], "change_pct": res["change_pct"],
+                                 "score": res["score"], "grade": res["grade"], "link": link})
+            if res["score"] < C.MIN_OUTPUT_SCORE:
+                continue
             res.update({
                 "symbol": ticker,
-                "name": str(info.get("name", ticker)),
-                "market": str(info.get("market", "")),
+                "name": name,
+                "market": market_name,
                 "turnover": float(info.get("turnover", 0.0) or 0.0),
                 "marketcap": float(info.get("marketcap", 0.0) or 0.0),
-                "link": f"https://m.stock.naver.com/domestic/stock/{ticker}/total",
+                "link": link,
             })
             items.append(res)
         except Exception:
@@ -87,7 +98,7 @@ def screen_kr() -> dict:
     data_date = str(last_date)[:10] if last_date is not None else \
         datetime.now(KST).strftime("%Y-%m-%d")
     print(f"[kr] 평가 {len(frames):,}종목 → 후보 {len(items):,} (오류 {errors})")
-    return _payload("kr", items, len(frames), data_date)
+    return _payload("kr", items, len(frames), data_date, search_index)
 
 
 def screen_us() -> dict:
@@ -96,6 +107,7 @@ def screen_us() -> dict:
     frames, meta = us_stock.load()
 
     items, errors, last_date = [], 0, None
+    search_index = []
     for ticker, df in frames.items():
         try:
             if len(df) < C.MIN_BARS:
@@ -103,19 +115,26 @@ def screen_us() -> dict:
             res = S.evaluate({"1d": df, "1w": S.resample_weekly(df)}, "us")
             if last_date is None or df.index[-1] > last_date:
                 last_date = df.index[-1]
-            if res is None or res["score"] < C.MIN_OUTPUT_SCORE:
+            if res is None:
                 continue
             info = meta.loc[ticker]
             exch = str(info.get("market", "US"))
+            # 미국 종목은 티커가 곧 이름 역할을 하므로 둘 다 보여준다
+            name = str(info.get("name", ticker))
+            link = us_stock.link_for(ticker, exch)
+            search_index.append({"symbol": ticker, "name": name, "market": exch,
+                                 "price": res["price"], "change_pct": res["change_pct"],
+                                 "score": res["score"], "grade": res["grade"], "link": link})
+            if res["score"] < C.MIN_OUTPUT_SCORE:
+                continue
             res.update({
                 "symbol": ticker,
-                # 미국 종목은 티커가 곧 이름 역할을 하므로 둘 다 보여준다
-                "name": str(info.get("name", ticker)),
+                "name": name,
                 "market": exch,
                 "sector": str(info.get("sector", "") or ""),
                 "turnover": float(info.get("turnover", 0.0) or 0.0),
                 "marketcap": 0.0,
-                "link": us_stock.link_for(ticker, exch),
+                "link": link,
             })
             items.append(res)
         except Exception:
@@ -127,7 +146,7 @@ def screen_us() -> dict:
     data_date = str(last_date)[:10] if last_date is not None else \
         datetime.now(KST).strftime("%Y-%m-%d")
     print(f"[us] 평가 {len(frames):,}종목 → 후보 {len(items):,} (오류 {errors})")
-    return _payload("us", items, len(frames), data_date)
+    return _payload("us", items, len(frames), data_date, search_index)
 
 
 def screen_coin() -> dict:
@@ -136,6 +155,7 @@ def screen_coin() -> dict:
     uni = upbit.universe()
 
     items, errors = [], 0
+    search_index = []
     for market, row in uni.iterrows():
         try:
             frames = {}
@@ -146,15 +166,22 @@ def screen_coin() -> dict:
             if "1d" not in frames or len(frames["1d"]) < C.COIN_MIN_LISTED_DAYS:
                 continue
             res = S.evaluate(frames, "coin")
-            if res is None or res["score"] < C.MIN_OUTPUT_SCORE:
+            if res is None:
+                continue
+            name = str(row["name"])
+            link = f"https://upbit.com/exchange?code=CRIX.UPBIT.{market}"
+            search_index.append({"symbol": market, "name": name, "market": "업비트 KRW",
+                                 "price": res["price"], "change_pct": res["change_pct"],
+                                 "score": res["score"], "grade": res["grade"], "link": link})
+            if res["score"] < C.MIN_OUTPUT_SCORE:
                 continue
             res.update({
                 "symbol": market,
-                "name": str(row["name"]),
+                "name": name,
                 "market": "업비트 KRW",
                 "turnover": float(row["acc_trade_price_24h"]),
                 "marketcap": 0.0,
-                "link": f"https://upbit.com/exchange?code=CRIX.UPBIT.{market}",
+                "link": link,
             })
             items.append(res)
         except Exception:
@@ -163,7 +190,7 @@ def screen_coin() -> dict:
                 traceback.print_exc()
 
     print(f"[coin] 평가 {len(uni)}종목 → 후보 {len(items)} (오류 {errors})")
-    return _payload("coin", items, len(uni), datetime.now(KST).strftime("%Y-%m-%d"))
+    return _payload("coin", items, len(uni), datetime.now(KST).strftime("%Y-%m-%d"), search_index)
 
 
 def screen_demo() -> dict:
@@ -199,11 +226,16 @@ def screen_demo() -> dict:
                     "turnover": float(vol[-1] * close[-1]), "marketcap": 5e11,
                     "link": "#"})
         items.append(res)
-    return _payload("kr", items, 24, datetime.now(KST).strftime("%Y-%m-%d"))
+    search_index = [{"symbol": it["symbol"], "name": it["name"], "market": it["market"],
+                     "price": it["price"], "change_pct": it["change_pct"],
+                     "score": it["score"], "grade": it["grade"], "link": it["link"]}
+                    for it in items]
+    return _payload("kr", items, 24, datetime.now(KST).strftime("%Y-%m-%d"), search_index)
 
 
 # ─────────────────────────────────────────────────────────
-def _payload(market: str, items: list[dict], scanned: int, data_date: str) -> dict:
+def _payload(market: str, items: list[dict], scanned: int, data_date: str,
+             search_index: list[dict] | None = None) -> dict:
     items.sort(key=lambda x: x["score"], reverse=True)
 
     counts: dict[str, int] = {}
@@ -237,6 +269,9 @@ def _payload(market: str, items: list[dict], scanned: int, data_date: str) -> di
         "indicator_help": R.BEGINNER_HELP,
         "conditions": R.CORE_CONDITION_TEXT,
         "items": items,
+        # 조건 미달로 목록엔 안 뜨지만 이름·티커 검색으로는 찾을 수 있는 전체 스캔 대상
+        # (기본 정보만 — 지표 상세는 items 쪽에만 있습니다).
+        "search_index": search_index or [],
     }
 
 

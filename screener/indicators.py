@@ -102,6 +102,17 @@ def obv(df: pd.DataFrame) -> pd.Series:
     return (direction * df["volume"]).cumsum()
 
 
+# ── 스토캐스틱(Slow) ────────────────────────────────────────
+def stochastic(df: pd.DataFrame, k_period: int = 14,
+               smooth: int = 3, d_period: int = 3) -> pd.DataFrame:
+    low_n = df["low"].rolling(k_period, min_periods=k_period).min()
+    high_n = df["high"].rolling(k_period, min_periods=k_period).max()
+    raw_k = (df["close"] - low_n) / (high_n - low_n).replace(0.0, np.nan) * 100.0
+    k = raw_k.rolling(smooth, min_periods=smooth).mean()   # Slow %K
+    d = k.rolling(d_period, min_periods=d_period).mean()   # %D
+    return pd.DataFrame({"k": k, "d": d})
+
+
 def slope_pct(s: pd.Series, n: int) -> pd.Series:
     """n봉 전 대비 변화율(%). 기준값이 0이거나 부호가 다르면 절대값 기준."""
     base = s.shift(n)
@@ -152,6 +163,9 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out["obv"] = obv(out)
     out["obv_slope"] = slope_pct(out["obv"], 20)
     out["obv_max60"] = out["obv"].rolling(60, min_periods=20).max()
+
+    st = stochastic(out)
+    out["stoch_k"], out["stoch_d"] = st["k"], st["d"]
 
     out["vol_ma"] = sma(out["volume"], C.VOL_MA_PERIOD)
     out["vol_ratio"] = out["volume"] / out["vol_ma"].replace(0.0, np.nan)

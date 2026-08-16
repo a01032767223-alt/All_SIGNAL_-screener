@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from . import config as C
+from . import reversal as REV
 from . import rules as R
 from . import score as S
 
@@ -53,6 +54,28 @@ def _diff_new(prev: dict, items: list[dict], grades=("S", "A")) -> list[dict]:
     return [i for i in items if i["grade"] in grades and i["symbol"] not in old]
 
 
+def _add_reversal(out: list[dict], df, asset_class: str, symbol: str, name: str,
+                   market_name: str, link: str, btc_df=None) -> None:
+    """추세전환 후보 평가 — 실패해도 메인 스코어링 흐름에 영향을 주지 않도록 감싼다."""
+    try:
+        rev = REV.evaluate_reversal(df, asset_class, btc_df=btc_df)
+    except Exception:
+        return
+    if rev is None or rev["stage"] is None:
+        return
+    out.append({
+        "symbol": symbol, "name": name, "market": market_name, "link": link,
+        "price": rev["price"], "change_pct": rev["change_pct"],
+        "score": rev["score"], "stage": rev["stage"], "stage_label": rev["stage_label"],
+        "breakout_confirmed": rev["breakout_confirmed"],
+        "decline_pct": rev["decline_pct"], "high_price": rev["high_price"],
+        "bars_since_high": rev["bars_since_high"],
+        "category_scores": rev["category_scores"], "category_max": rev["category_max"],
+        "signals": rev["signals"], "reasons": rev["reasons"],
+        "signals_passed": rev["signals_passed"], "signals_total": rev["signals_total"],
+    })
+
+
 # ─────────────────────────────────────────────────────────
 def screen_kr() -> dict:
     from .sources import kr_stock
@@ -60,7 +83,7 @@ def screen_kr() -> dict:
     frames, meta = kr_stock.load()
 
     items, errors, last_date = [], 0, None
-    search_index = []
+    search_index, reversal_candidates = [], []
     for ticker, df in frames.items():
         try:
             if len(df) < C.MIN_BARS:
@@ -79,6 +102,7 @@ def screen_kr() -> dict:
             search_index.append({"symbol": ticker, "name": name, "market": market_name,
                                  "price": res["price"], "change_pct": res["change_pct"],
                                  "score": res["score"], "grade": res["grade"], "link": link})
+            _add_reversal(reversal_candidates, df, "kr", ticker, name, market_name, link)
             if res["score"] < C.MIN_OUTPUT_SCORE:
                 continue
             res.update({
@@ -97,8 +121,9 @@ def screen_kr() -> dict:
 
     data_date = str(last_date)[:10] if last_date is not None else \
         datetime.now(KST).strftime("%Y-%m-%d")
-    print(f"[kr] 평가 {len(frames):,}종목 → 후보 {len(items):,} (오류 {errors})")
-    return _payload("kr", items, len(frames), data_date, search_index)
+    print(f"[kr] 평가 {len(frames):,}종목 → 후보 {len(items):,} "
+          f"(추세전환 {len(reversal_candidates):,}, 오류 {errors})")
+    return _payload("kr", items, len(frames), data_date, search_index, reversal_candidates)
 
 
 def screen_us() -> dict:
@@ -107,7 +132,7 @@ def screen_us() -> dict:
     frames, meta = us_stock.load()
 
     items, errors, last_date = [], 0, None
-    search_index = []
+    search_index, reversal_candidates = [], []
     for ticker, df in frames.items():
         try:
             if len(df) < C.MIN_BARS:
@@ -125,6 +150,7 @@ def screen_us() -> dict:
             search_index.append({"symbol": ticker, "name": name, "market": exch,
                                  "price": res["price"], "change_pct": res["change_pct"],
                                  "score": res["score"], "grade": res["grade"], "link": link})
+            _add_reversal(reversal_candidates, df, "us", ticker, name, exch, link)
             if res["score"] < C.MIN_OUTPUT_SCORE:
                 continue
             res.update({
@@ -145,8 +171,9 @@ def screen_us() -> dict:
     # 미국장 마감 시점의 현지 날짜가 곧 데이터 날짜다 (한국 날짜와 하루 어긋난다)
     data_date = str(last_date)[:10] if last_date is not None else \
         datetime.now(KST).strftime("%Y-%m-%d")
-    print(f"[us] 평가 {len(frames):,}종목 → 후보 {len(items):,} (오류 {errors})")
-    return _payload("us", items, len(frames), data_date, search_index)
+    print(f"[us] 평가 {len(frames):,}종목 → 후보 {len(items):,} "
+          f"(추세전환 {len(reversal_candidates):,}, 오류 {errors})")
+    return _payload("us", items, len(frames), data_date, search_index, reversal_candidates)
 
 
 def screen_coin() -> dict:
@@ -154,8 +181,18 @@ def screen_coin() -> dict:
 
     uni = upbit.universe()
 
+    # 코인 특화 추세전환 신호(BTC 대비 상대강도)에 쓸 BTC 일봉 — 종목마다 다시 받지
+    # 않도록 한 번만 받아 재사용한다. 실패해도 전체 스크리닝은 계속 진행한다
+    # (그 경우 코인 특화 10점만 빠지고 90점 만점으로 재환산된다).
+    try:
+        btc_df = upbit.candles("KRW-BTC", "1d", 200)
+        if btc_df.empty:
+            btc_df = None
+    except Exception:
+        btc_df = None
+
     items, errors = [], 0
-    search_index = []
+    search_index, reversal_candidates = [], []
     for market, row in uni.iterrows():
         try:
             frames = {}
@@ -173,6 +210,8 @@ def screen_coin() -> dict:
             search_index.append({"symbol": market, "name": name, "market": "업비트 KRW",
                                  "price": res["price"], "change_pct": res["change_pct"],
                                  "score": res["score"], "grade": res["grade"], "link": link})
+            _add_reversal(reversal_candidates, frames["1d"], "coin", market, name, "업비트 KRW", link,
+                         btc_df=None if market == "KRW-BTC" else btc_df)
             if res["score"] < C.MIN_OUTPUT_SCORE:
                 continue
             res.update({
@@ -189,8 +228,10 @@ def screen_coin() -> dict:
             if errors <= 3:
                 traceback.print_exc()
 
-    print(f"[coin] 평가 {len(uni)}종목 → 후보 {len(items)} (오류 {errors})")
-    return _payload("coin", items, len(uni), datetime.now(KST).strftime("%Y-%m-%d"), search_index)
+    print(f"[coin] 평가 {len(uni)}종목 → 후보 {len(items)} "
+          f"(추세전환 {len(reversal_candidates)}, 오류 {errors})")
+    return _payload("coin", items, len(uni), datetime.now(KST).strftime("%Y-%m-%d"),
+                    search_index, reversal_candidates)
 
 
 def screen_demo() -> dict:
@@ -230,12 +271,45 @@ def screen_demo() -> dict:
                      "price": it["price"], "change_pct": it["change_pct"],
                      "score": it["score"], "grade": it["grade"], "link": it["link"]}
                     for it in items]
-    return _payload("kr", items, 24, datetime.now(KST).strftime("%Y-%m-%d"), search_index)
+
+    # 추세전환 탭 오프라인 미리보기용 — 급락 후 바닥을 다지는 합성 종목 몇 개를 더 만든다.
+    # pre_pad(120봉 관찰창 밖의 지표 워밍업용) + lead(고점 기준) + decline(급락) +
+    # bounce/retest(Higher Low) + breakout(반등 고점 돌파)로 구성 — 관찰창(120봉) 안에
+    # 고점·급락·바닥 다지기가 전부 들어오도록 길이를 맞췄다.
+    reversal_candidates = []
+    for i in range(6):
+        pre_pad = np.full(100, 10000.0) * (1 + rng.normal(0, 0.003, 100))
+        lead = np.full(20, 10000.0) * (1 + rng.normal(0, 0.003, 20))
+        decline = lead[-1] * np.exp(np.cumsum(rng.normal(-0.013 - i * 0.0004, 0.017, 50)))
+        low1 = decline[-1]
+        bounce = low1 * np.exp(np.cumsum(rng.normal(0.008, 0.011, 10)))
+        interim_high = bounce[-1]
+        retest = interim_high * np.exp(np.cumsum(rng.normal(-0.004, 0.009, 8)))
+        low2 = retest[-1]
+        breakout = low2 * np.exp(np.cumsum(rng.normal(0.009 + i * 0.001, 0.011, 27)))
+        close = np.concatenate([pre_pad, lead, decline, bounce, retest, breakout])
+        m = len(close)
+        high = close * (1 + np.abs(rng.normal(0, 0.006, m)))
+        low = close * (1 - np.abs(rng.normal(0, 0.006, m)))
+        open_ = np.r_[close[0], close[:-1]]
+        vol = rng.lognormal(11, 0.25, m)
+        decl_start, decl_end = 120, 170       # pre_pad(100)+lead(20)=120, decline 50봉
+        vol[decl_start:decl_end] *= np.linspace(2.2, 1.0, decl_end - decl_start)
+        vol[decl_end + 18:] *= np.linspace(1.2, 2.0, m - (decl_end + 18))
+        idx = pd.bdate_range(end=datetime.now(), periods=m + 5)[-m:]
+        rdf = pd.DataFrame({"open": open_, "high": high, "low": low,
+                            "close": close, "volume": vol}, index=idx)
+        _add_reversal(reversal_candidates, rdf, "kr", f"10000{i:02d}", f"반전샘플{i:02d}",
+                     "KOSPI" if i % 2 else "KOSDAQ", "#")
+
+    return _payload("kr", items, 24, datetime.now(KST).strftime("%Y-%m-%d"),
+                    search_index, reversal_candidates)
 
 
 # ─────────────────────────────────────────────────────────
 def _payload(market: str, items: list[dict], scanned: int, data_date: str,
-             search_index: list[dict] | None = None) -> dict:
+             search_index: list[dict] | None = None,
+             reversal_candidates: list[dict] | None = None) -> dict:
     items.sort(key=lambda x: x["score"], reverse=True)
 
     counts: dict[str, int] = {}
@@ -249,6 +323,19 @@ def _payload(market: str, items: list[dict], scanned: int, data_date: str,
         print(f"[out] 후보 {len(items):,}건 중 상위 {C.MAX_OUTPUT_ITEMS}건만 저장 "
               f"({truncated:,}건 제외, 최저 점수 {items[C.MAX_OUTPUT_ITEMS - 1]['score']:.1f})")
         items = items[:C.MAX_OUTPUT_ITEMS]
+
+    reversal_candidates = list(reversal_candidates or [])
+    # 확인 진입 → 초기 진입 순, 그 안에서는 점수 내림차순 (돌파가 이미 확인된 쪽을 먼저 보여준다)
+    reversal_candidates.sort(key=lambda x: (x["stage"] != "confirmed", -x["score"]))
+    rev_total_found = len(reversal_candidates)
+    rev_truncated = max(0, len(reversal_candidates) - C.REV_MAX_OUTPUT_ITEMS)
+    if rev_truncated:
+        print(f"[out] 추세전환 후보 {len(reversal_candidates):,}건 중 상위 "
+              f"{C.REV_MAX_OUTPUT_ITEMS}건만 저장 ({rev_truncated:,}건 제외)")
+        reversal_candidates = reversal_candidates[:C.REV_MAX_OUTPUT_ITEMS]
+    rev_stage_counts = {"early": 0, "confirmed": 0}
+    for rc in reversal_candidates:
+        rev_stage_counts[rc["stage"]] = rev_stage_counts.get(rc["stage"], 0) + 1
 
     return {
         "market": market,
@@ -272,6 +359,17 @@ def _payload(market: str, items: list[dict], scanned: int, data_date: str,
         # 조건 미달로 목록엔 안 뜨지만 이름·티커 검색으로는 찾을 수 있는 전체 스캔 대상
         # (기본 정보만 — 지표 상세는 items 쪽에만 있습니다).
         "search_index": search_index or [],
+        # 추세전환(바닥권 반전) 후보 — 매수신호 등급과는 별개의 스코어링.
+        # 최근 120봉 고점 대비 15% 이상 하락한 종목만 대상으로 하므로, 매수신호 탭의
+        # items와는 대체로 겹치지 않는다 (하락 중인 종목은 애초에 매수신호 점수가 낮다).
+        "reversal_candidates": reversal_candidates,
+        "reversal_total_found": rev_total_found,
+        "reversal_truncated": rev_truncated,
+        "reversal_stage_counts": rev_stage_counts,
+        "reversal_cat_labels": REV.CAT_LABELS,
+        "reversal_stage_label": REV.STAGE_LABEL,
+        "reversal_stage_help": REV.STAGE_HELP,
+        "reversal_min_decline_pct": REV.MIN_DECLINE_PCT,
     }
 
 

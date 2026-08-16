@@ -90,6 +90,7 @@ input[type=search]{flex:1;min-width:110px}
 .b-S{background:var(--seq-200)} .b-A{background:var(--seq-300)}
 .b-B{background:var(--seq-400);color:#fff} .b-C{background:var(--seq-500);color:#fff}
 .b-x{background:var(--surface-3);color:var(--text-2)}
+.stage-early{background:var(--warn);color:#241a00} .stage-confirmed{background:var(--good);color:#fff}
 /* 카드(버튼) 안에 앵커를 중첩하면 접근성·클릭버블링 문제가 생기므로, 차트
    바로가기는 카드 바로 아래 얇은 줄로 형제 요소에 붙인다. */
 .card-wrap{margin-bottom:9px}
@@ -99,6 +100,26 @@ input[type=search]{flex:1;min-width:110px}
 .chart-ico:hover{color:var(--seq-300)}
 .card.outside{border-style:dashed}
 #searchExtra:not(:empty){margin-top:6px}
+
+/* 매수신호 / 추세전환 콘텐츠 토글 */
+.ctoggle{display:flex;gap:6px;margin-top:14px}
+.ctbtn{flex:1;padding:10px 0;border:1px solid var(--line);border-radius:10px;
+  background:var(--surface-1);color:var(--text-2);font:600 13.5px/1 inherit;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;gap:6px}
+.ctbtn[aria-pressed="true"]{background:var(--surface-2);color:var(--text-1);border-color:var(--seq-400)}
+.ctbtn .new{font-size:9px;font-weight:800;color:#241a00;background:var(--warn);
+  border-radius:5px;padding:1.5px 5px;letter-spacing:.3px}
+.rev-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.rev-tags .tag{font-size:10.5px;padding:3px 8px;border-radius:999px;background:var(--surface-2);
+  color:var(--text-2);border:1px solid var(--line)}
+.stagebox{background:var(--surface-2);border-radius:11px;padding:11px 12px;margin-bottom:4px;
+  border-left:3px solid var(--warn)}
+.stagebox.confirmed{border-left-color:var(--good)}
+.stagebox b{font-size:14px} .stagebox p{margin:5px 0 0;font-size:12.5px;color:var(--text-2)}
+.whybox{background:var(--surface-2);border-radius:9px;padding:10px 11px;margin-bottom:6px}
+.whybox b{font-size:13px} .whybox p{margin:4px 0 0;font-size:12px;color:var(--text-2);line-height:1.55}
+.catbar{margin-bottom:10px}
+.catbar .lbl{display:flex;justify-content:space-between;font-size:12px;color:var(--text-2);margin-bottom:4px}
 .nm{flex:1;min-width:0}
 .nm b{display:block;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nm span{font-size:11px;color:var(--text-3)}
@@ -238,6 +259,10 @@ a{color:var(--seq-300)}
 
 <div class="wrap">
   <div id="screen-list">
+    <div class="ctoggle" id="ctoggle">
+      <button class="ctbtn" data-c="signal" aria-pressed="true">매수신호</button>
+      <button class="ctbtn" data-c="reversal" aria-pressed="false">추세전환 <span class="new">NEW</span></button>
+    </div>
     <div class="tiles" id="tiles"></div>
 
     <div class="controls">
@@ -280,9 +305,19 @@ const GRADES=["S","A","B","C"];
 const SHORT={ma:"MA",volume:"거래량",structure:"구조",rsi:"RSI",macd:"MACD",
              bb:"BB",adx:"ADX",obv:"OBV"};
 const ORDER=["ma","volume","structure","rsi","macd","bb","adx","obv"];
+const REV_STAGES=["confirmed","early"];
+const STAGE_TXT={confirmed:"확인 진입",early:"초기 진입"};
+const CONTENT_CUT={signal:{min:55,max:95,def:65}, reversal:{min:0,max:100,def:35}};
+const SORT_OPTS={
+  signal:[["score","점수순"],["turnover","거래대금순"],["change","등락률순"],
+          ["checks","충족조건순"],["rr","손익비순"]],
+  reversal:[["score","반전점수순"],["decline","하락폭순"],["change","등락률순"],
+            ["signals","충족신호순"]],
+};
 const state={market:"kr",cut:65,grades:new Set(GRADES),q:"",sort:"score",
              view:"card",screen:"list",data:{},fetched:{},last:null,
-             loading:false,stale:false};
+             loading:false,stale:false,
+             content:"signal",revStages:new Set(REV_STAGES)};
 
 /* 현재 보고 있는 시장의 통화 — 미국주식만 달러 표기가 된다 */
 const curOf=()=>((state.data[state.market]||{}).currency)||"KRW";
@@ -335,6 +370,16 @@ function filtered(d){
   return it.sort((a,b)=>key(b)-key(a));
 }
 
+function filteredReversal(d){
+  const q=state.q.trim().toLowerCase();
+  const passesSearch=x=>!q||x.name.toLowerCase().includes(q)||x.symbol.toLowerCase().includes(q);
+  const it=(d.reversal_candidates||[]).filter(x=>
+    passesSearch(x)&&x.score>=state.cut&&state.revStages.has(x.stage));
+  const key={score:x=>x.score,decline:x=>-x.decline_pct,change:x=>x.change_pct,
+             signals:x=>x.signals_passed}[state.sort]||(x=>x.score);
+  return it.sort((a,b)=>key(b)-key(a));
+}
+
 function tiles(d){
   const g=d.grade_counts||{};
   document.getElementById("tiles").innerHTML=
@@ -342,10 +387,28 @@ function tiles(d){
     `<div class="tile"><b>${(d.scanned||0).toLocaleString()}</b><span>스캔</span></div>`;
 }
 
+function tilesReversal(d){
+  const sc=d.reversal_stage_counts||{};
+  const arr=d.reversal_candidates||[];
+  const avg=arr.length?arr.reduce((s,x)=>s+x.decline_pct,0)/arr.length:0;
+  document.getElementById("tiles").innerHTML=
+    `<div class="tile"><b>${sc.confirmed||0}</b><span>확인진입</span></div>`+
+    `<div class="tile"><b>${sc.early||0}</b><span>초기진입</span></div>`+
+    `<div class="tile"><b>${arr.length?avg.toFixed(0)+"%":"-"}</b><span>평균낙폭</span></div>`+
+    `<div class="tile"><b>${(d.reversal_total_found||0).toLocaleString()}</b><span>전체후보</span></div>`+
+    `<div class="tile"><b>${(d.scanned||0).toLocaleString()}</b><span>스캔</span></div>`;
+}
+
 function chips(){
-  document.getElementById("grades").innerHTML=GRADES.map(g=>
-    `<button class="chip" data-g="${g}" aria-pressed="${state.grades.has(g)}">${g}등급</button>`
-  ).join("");
+  if(state.content==="signal"){
+    document.getElementById("grades").innerHTML=GRADES.map(g=>
+      `<button class="chip" data-g="${g}" aria-pressed="${state.grades.has(g)}">${g}등급</button>`
+    ).join("");
+  }else{
+    document.getElementById("grades").innerHTML=REV_STAGES.map(s=>
+      `<button class="chip" data-s="${s}" aria-pressed="${state.revStages.has(s)}">${STAGE_TXT[s]}</button>`
+    ).join("");
+  }
 }
 
 function cardHTML(x){
@@ -400,6 +463,28 @@ function searchCardHTML(x){
     rel="noopener noreferrer">📈 차트 보기 ↗</a>`:""}</div>`;
 }
 
+/* 추세전환 후보 카드 — 매수신호와는 별개 스코어링(가격구조·거래량·모멘텀·이동평균·
+   변동성·코인특화). 초기진입(아직 돌파 전) vs 확인진입(직전 고점 돌파 확인) 배지로 구분. */
+function reversalCardHTML(x){
+  const stg=x.stage;
+  const tags=(x.reasons||[]).slice(0,3).map(r=>`<span class="tag">${esc(r.label)}</span>`).join("");
+  return `<div class="card-wrap"><button class="card" data-revsym="${esc(x.symbol)}">
+    <div class="c-top">
+      <span class="badge stage-${stg}">${stg==="confirmed"?"확인":"초기"}</span>
+      <span class="nm"><b>${esc(x.name)}</b><span>${esc(x.symbol)} · ${esc(x.market||"")}</span></span>
+      <span class="px"><b>${fmtP(x.price)}</b>
+        <span class="${cls(x.change_pct)}">${arrow(x.change_pct)} ${Math.abs(x.change_pct).toFixed(2)}%</span></span>
+    </div>
+    <p class="head">${STAGE_TXT[stg]} · 반전점수 ${x.score.toFixed(1)} · 고점 대비 ${x.decline_pct.toFixed(1)}%</p>
+    <div class="meter"><i style="width:${x.score}%"></i></div>
+    ${tags?`<div class="rev-tags">${tags}</div>`:""}
+    <div class="c-foot">
+      <span>충족 신호 ${x.signals_passed}/${x.signals_total}</span>
+      <span>${x.breakout_confirmed?"직전 고점 돌파 확인":"아직 돌파 전"}</span>
+    </div></button>${x.link?`<a class="chart-ico" href="${esc(x.link)}" target="_blank"
+      rel="noopener noreferrer">📈 차트 보기 ↗</a>`:""}</div>`;
+}
+
 function tableHTML(items){
   return `<table class="list"><thead><tr><th>종목</th><th>등급</th><th>점수</th><th>현재가</th>
     <th>등락</th><th>조건</th><th>손익비</th><th>경고</th><th>차트</th></tr></thead><tbody>`+
@@ -419,9 +504,27 @@ function render(){
   // 방금 비운 목록에 이전 시장 카드가 다시 나타난다.
   if(state.loading) return;
   const d=state.data[state.market]; if(!d) return;
+  const list=document.getElementById("list"), tbl=document.getElementById("table");
+
+  if(state.content==="reversal"){
+    tilesReversal(d);
+    tbl.hidden=true; list.hidden=false;
+    const items=filteredReversal(d);
+    const cap=d.reversal_truncated?`<p class="note" style="margin-top:4px;border:none;padding:0">
+        추세전환 후보 ${(d.reversal_total_found||0).toLocaleString()}건 중 상위 ${
+        (d.reversal_candidates||[]).length}건만 표시합니다.</p>`:"";
+    list.innerHTML=items.length?items.map(reversalCardHTML).join("")+cap
+      :`<p class="empty">조건에 맞는 추세전환 후보가 없습니다.<br>최소 점수를 낮추거나 진입 단계를 더 선택해보세요.</p>`;
+    document.getElementById("searchExtra").innerHTML="";   // 추세전환에는 조건-밖 검색이 없음
+    const demo=d.demo?" · 샘플데이터":"";
+    const stale=state.stale?" · 오프라인(저장본)":"";
+    document.getElementById("stamp").textContent=
+      `${d.data_date} · 추세전환 ${items.length}건 · ${(d.generated_at||"").slice(11,16)} 갱신${demo}${stale}`;
+    return;
+  }
+
   tiles(d);
   const items=filtered(d);
-  const list=document.getElementById("list"), tbl=document.getElementById("table");
   const cap=d.truncated?`<p class="note" style="margin-top:4px;border:none;padding:0">
       조건 충족 ${d.total_found.toLocaleString()}건 중 점수 상위 ${d.count}건만 표시합니다.</p>`:"";
   if(state.view==="table"){
@@ -527,6 +630,80 @@ function openDetail(sym){
 
       <div class="sec">지표 8개 — 실제 수치와 점수</div>
       ${inds}
+    </div>`;
+  const dlg=document.getElementById("dlg");
+  dlg.showModal();
+  document.getElementById("cl").onclick=()=>dlg.close();
+}
+
+/* 추세전환 후보 상세 — 카테고리별 점수(가격구조/거래량/모멘텀/이동평균/변동성/코인특화)와
+   "왜 이 종목인가"(충족된 신호 전부, 배점·근거 포함), 초기/확인 진입 단계 설명을 보여준다. */
+function openReversalDetail(sym){
+  const d=state.data[state.market];
+  if(!d||!Array.isArray(d.reversal_candidates)) return;
+  const x=d.reversal_candidates.find(i=>i.symbol===sym); if(!x) return;
+  const stg=x.stage;
+  const stageHelp=(d.reversal_stage_help||{})[stg]||"";
+  const catLabels=d.reversal_cat_labels||{};
+
+  const catBars=Object.entries(x.category_scores||{}).map(([k,v])=>{
+    const max=(x.category_max||{})[k]||1;
+    const pct=Math.max(0,Math.min(100,v/max*100));
+    return `<div class="catbar"><div class="lbl"><span>${esc(catLabels[k]||k)}</span>
+      <span>${v.toFixed(1)} / ${max}</span></div>
+      <div class="track"><i style="width:${pct}%"></i></div></div>`;
+  }).join("");
+
+  const why=(x.reasons&&x.reasons.length)?x.reasons.map(r=>
+    `<div class="whybox"><b>${esc(r.label)} (+${r.points}점)</b><p>${esc(r.detail)}</p></div>`).join("")
+    :`<p class="dt">뚜렷하게 단독으로 충족된 신호는 없고, 여러 조건에 점수가 조금씩 걸쳐 있는 상태입니다.</p>`;
+
+  const allSignals=(x.signals||[]).map(s=>
+    `<tr><td class="mk">${s.ok?"✓":"○"} ${esc(s.label)}</td>
+     <td class="mv">${s.points>0?"+"+s.points:"-"}<span class="mn">${esc(s.detail)}</span></td></tr>`
+  ).join("");
+
+  document.getElementById("dlgc").innerHTML=`
+    <div class="dh">
+      <span class="badge stage-${stg}">${stg==="confirmed"?"확인":"초기"}</span>
+      <span class="nm"><b style="font-size:16px">${esc(x.name)}</b>
+        <span>${esc(x.symbol)} · 반전점수 ${x.score.toFixed(1)} · 신호 ${x.signals_passed}/${x.signals_total}</span></span>
+      ${x.link?`<a class="chartlink" href="${esc(x.link)}" target="_blank"
+        rel="noopener noreferrer">📈 차트 보기</a>`:""}
+      <button class="close" id="cl" aria-label="닫기">✕</button>
+    </div>
+    <div class="db">
+      <div class="stagebox ${stg}">
+        <b>${STAGE_TXT[stg]}</b>
+        <p>${esc(stageHelp)}</p>
+      </div>
+
+      <div class="sec">가격과 하락폭</div>
+      <div class="kv">
+        <div><span>현재가</span><b>${fmtP(x.price)}
+          <small class="${cls(x.change_pct)}">${arrow(x.change_pct)} ${Math.abs(x.change_pct).toFixed(2)}%</small></b></div>
+        <div><span>최근 고점 대비</span><b>${x.decline_pct.toFixed(1)}%</b></div>
+        <div><span>최근 고점가</span><b>${fmtP(x.high_price)}</b></div>
+        <div><span>고점 이후 경과</span><b>${x.bars_since_high}봉</b></div>
+      </div>
+
+      <div class="sec">왜 이 종목인가</div>
+      ${why}
+
+      <div class="sec">카테고리별 점수</div>
+      ${catBars}
+
+      <details><summary>평가한 신호 ${x.signals_total}개 전부 보기</summary>
+        <table class="mtab" style="margin-top:8px">${allSignals}</table>
+      </details>
+
+      <p class="dt" style="margin-top:14px">이 점수는 바닥을 정확히 맞추는 예측이 아니라, 하락이
+        멈추고 있다는 정황 증거를 여러 개 모아 다른 종목보다 먼저 후보를 좁히기 위한 도구입니다.
+        ${stg==="early"
+          ?"특히 <b>초기 진입</b>은 아직 직전 고점 돌파가 확인되지 않아 되돌림(가짜 반등)"
+           +" 위험이 가장 큽니다. 먼저 들어가는 대신 그만큼 확률은 낮게 잡아야 합니다."
+          :"<b>확인 진입</b>도 하락 추세 자체가 완전히 끝났다는 보장은 아닙니다."}
+        분할 진입과 손절선은 반드시 스스로 정하세요.</p>
     </div>`;
   const dlg=document.getElementById("dlg");
   dlg.showModal();
@@ -685,18 +862,50 @@ document.getElementById("q").addEventListener("input",e=>{state.q=e.target.value
 document.getElementById("sort").addEventListener("change",e=>{state.sort=e.target.value;render();});
 document.getElementById("grades").addEventListener("click",e=>{
   const b=e.target.closest(".chip"); if(!b) return;
-  const g=b.dataset.g;
-  state.grades.has(g)?state.grades.delete(g):state.grades.add(g);
-  b.setAttribute("aria-pressed",state.grades.has(g)); render();});
+  if(state.content==="signal"){
+    const g=b.dataset.g;
+    state.grades.has(g)?state.grades.delete(g):state.grades.add(g);
+    b.setAttribute("aria-pressed",state.grades.has(g));
+  }else{
+    const s=b.dataset.s;
+    state.revStages.has(s)?state.revStages.delete(s):state.revStages.add(s);
+    b.setAttribute("aria-pressed",state.revStages.has(s));
+  }
+  render();});
 document.getElementById("viewtoggle").addEventListener("click",e=>{
   state.view=state.view==="card"?"table":"card";
   e.target.textContent=state.view==="card"?"표로 보기":"카드로 보기"; render();});
 document.getElementById("list").addEventListener("click",e=>{
-  const c=e.target.closest(".card"); if(c) openDetail(c.dataset.sym);});
+  const c=e.target.closest(".card"); if(!c) return;
+  if(c.dataset.sym) openDetail(c.dataset.sym);
+  else if(c.dataset.revsym) openReversalDetail(c.dataset.revsym);});
 document.getElementById("searchExtra").addEventListener("click",e=>{
   const c=e.target.closest("[data-searchsym]"); if(c) openSearchDetail(c.dataset.searchsym);});
 document.getElementById("dlg").addEventListener("click",e=>{
   if(e.target.id==="dlg") e.target.close();});
+
+/* 매수신호 ↔ 추세전환 콘텐츠 토글 — 최소점수 슬라이더 범위·정렬 옵션·칩까지 함께 바꾼다 */
+function sortOptsHTML(){
+  return SORT_OPTS[state.content].map(([v,l])=>`<option value="${v}">${l}</option>`).join("");
+}
+document.getElementById("ctoggle").addEventListener("click",e=>{
+  const b=e.target.closest(".ctbtn"); if(!b) return;
+  const c=b.dataset.c; if(c===state.content) return;
+  state.content=c;
+  document.querySelectorAll("#ctoggle .ctbtn").forEach(x=>x.setAttribute("aria-pressed", String(x.dataset.c===c)));
+  const cc=CONTENT_CUT[c];
+  state.cut=cc.def;
+  const cutEl=document.getElementById("cut");
+  cutEl.min=cc.min; cutEl.max=cc.max; cutEl.value=cc.def;
+  document.getElementById("cutv").textContent=cc.def;
+  state.sort=SORT_OPTS[c][0][0];
+  document.getElementById("sort").innerHTML=sortOptsHTML();
+  document.getElementById("viewtoggle").style.display=c==="signal"?"":"none";
+  if(c==="reversal" && state.view==="table"){
+    state.view="card"; document.getElementById("viewtoggle").textContent="표로 보기";
+  }
+  chips();
+  render();});
 
 function mark(id){
   ["tab-kr","tab-us","tab-coin","tab-guide"].forEach(t=>
